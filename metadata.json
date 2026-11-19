@@ -1,0 +1,6 @@
+{
+  "name": "Hindi Movie Dubbing AI",
+  "description": "Import MP4 movies, transcribe English dialogue with speaker diarization, translate to natural conversational Hindi, generate multi-voice Hindi dubbing, preserve background music and SFX, and export dubbed MP4 videos.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

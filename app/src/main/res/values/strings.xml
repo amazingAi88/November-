@@ -1,0 +1,19 @@
+<resources>
+    <string name="app_name">Hindi Movie Dubbing AI</string>
+    <string name="studio_tagline">On-Device &amp; AI English to Hindi Movie Dubbing</string>
+    <string name="nav_home">Studio</string>
+    <string name="nav_settings">Settings</string>
+    <string name="select_movie_cta">Select Movie (MP4, MKV, WebM, MOV, AVI…)</string>
+    <string name="supported_formats_title">Supported Video &amp; Audio Formats</string>
+    <string name="supported_formats_body">Supports MP4, MKV, WebM, MOV, AVI, 3GP, M4V, MPEG-TS, FLV, and OGV up to 2+ hours (with any Android-decodable audio track). Exported universally as Hindi-dubbed MP4.</string>
+    <string name="privacy_notice_title">100% On-Device Free Mode (Android Go Ready)</string>
+    <string name="privacy_notice_body">Default On-Device Mode runs Vosk Speech Recognition, Google ML Kit Translation, and Android Hindi TTS right inside your phone (after a one-time ~70 MB model download). Zero paid API keys and zero rate limits.</string>
+    <string name="quota_notice_title">Optional Gemini Cloud Mode</string>
+    <string name="quota_notice_body">You can switch to Gemini Cloud in Dubbing Settings or Studio Settings for cinematic AI voices. Cloud free-tier quotas (429 rate limits) only apply if you choose Gemini Cloud Mode.</string>
+    <string name="voice_disclosure">AI Hindi voices use synthesized studio or on-device TTS presets (Male, Female, Neutral) and do not clone the original actor\'s voice.</string>
+    <string name="separation_warning_stereo">Stereo Mid-Side + Speech-Band Suppression active. Preserves stereo music &amp; SFX while attenuating center-panned English dialogue. Without a neural stem separator, faint centered reverb or mono speech may remain.</string>
+    <string name="separation_warning_mono">Mono audio track detected. Center-channel dialogue cancellation cannot isolate speech from mono mixes; speech-band ducking is used, so original English dialogue may remain faintly audible.</string>
+    <string name="notification_channel_name">Dubbing Pipeline</string>
+    <string name="notification_channel_desc">Shows progress while extracting audio, translating, and generating Hindi dubbing.</string>
+    <string name="cancel_dubbing">Pause / Stop</string>
+</resources>
