@@ -19,7 +19,8 @@ data class StudioPreferences(
     val defaultSpeechSpeed: Float = 1.0f,
     val defaultPreserveBgm: Boolean = true,
     val defaultExportQuality: String = ExportQuality.ORIGINAL,
-    val autoCleanupAfterExport: Boolean = false
+    val autoCleanupAfterExport: Boolean = false,
+    val activeGgufModelFileName: String = ""
 )
 
 class PreferencesRepository(private val context: Context) {
@@ -31,6 +32,7 @@ class PreferencesRepository(private val context: Context) {
         val PRESERVE_BGM = booleanPreferencesKey("preserve_bgm")
         val EXPORT_QUALITY = stringPreferencesKey("export_quality")
         val AUTO_CLEANUP = booleanPreferencesKey("auto_cleanup_after_export")
+        val ACTIVE_GGUF_MODEL = stringPreferencesKey("active_gguf_model")
     }
 
     val preferencesFlow: Flow<StudioPreferences> = context.dataStore.data.map { prefs ->
@@ -41,7 +43,8 @@ class PreferencesRepository(private val context: Context) {
             defaultSpeechSpeed = prefs[Keys.SPEECH_SPEED] ?: 1.0f,
             defaultPreserveBgm = prefs[Keys.PRESERVE_BGM] ?: true,
             defaultExportQuality = prefs[Keys.EXPORT_QUALITY] ?: ExportQuality.ORIGINAL,
-            autoCleanupAfterExport = prefs[Keys.AUTO_CLEANUP] ?: false
+            autoCleanupAfterExport = prefs[Keys.AUTO_CLEANUP] ?: false,
+            activeGgufModelFileName = prefs[Keys.ACTIVE_GGUF_MODEL] ?: ""
         )
     }
 
@@ -71,5 +74,9 @@ class PreferencesRepository(private val context: Context) {
 
     suspend fun setAutoCleanup(enabled: Boolean) {
         context.dataStore.edit { it[Keys.AUTO_CLEANUP] = enabled }
+    }
+
+    suspend fun setActiveGgufModelFileName(fileName: String) {
+        context.dataStore.edit { it[Keys.ACTIVE_GGUF_MODEL] = fileName }
     }
 }

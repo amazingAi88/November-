@@ -100,6 +100,7 @@ fun DubbingStudioNavHost() {
             DubbingSettingsScreen(
                 viewModel = vm,
                 onBack = { navController.popBackStack() },
+                onOpenSettings = { navController.navigate(SettingsRoute) },
                 onNextAudioSettings = {
                     navController.navigate(AudioSettingsRoute(route.projectId))
                 }

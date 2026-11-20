@@ -121,6 +121,7 @@ dependencies {
     artifact { type = "aar" }
     exclude(group = "net.java.dev.jna", module = "jna")
   }
+  implementation(libs.llama.android)
   // implementation(libs.coil.compose)
   // implementation(libs.converter.moshi)
   implementation(libs.firebase.ai)

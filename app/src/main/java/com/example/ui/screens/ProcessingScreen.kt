@@ -187,7 +187,8 @@ fun ProcessingScreen(
                     currentProject.currentStage.contains("Preparing", ignoreCase = true) ||
                     currentProject.currentStage.contains("Downloading", ignoreCase = true) ||
                     currentProject.currentStage.contains("Extracting offline", ignoreCase = true) ||
-                    currentProject.currentStage.contains("Checking ML Kit", ignoreCase = true)
+                    currentProject.currentStage.contains("Checking ML Kit", ignoreCase = true) ||
+                    currentProject.currentStage.contains("Verifying local", ignoreCase = true)
                 )
 
             val animatedProgress by animateFloatAsState(
@@ -331,10 +332,10 @@ fun ProcessingScreen(
 
                             Spacer(modifier = Modifier.height(6.dp))
                             StatusPill(
-                                label = if (currentProject.engineMode == EngineMode.ON_DEVICE_FREE) {
-                                    "ON-DEVICE FREE (₹0)"
-                                } else {
-                                    "GEMINI CLOUD"
+                                label = when (currentProject.engineMode) {
+                                    EngineMode.ON_DEVICE_FREE -> "ON-DEVICE FREE (₹0)"
+                                    EngineMode.ON_DEVICE_LLM -> "LOCAL GGUF LLM (100% OFFLINE)"
+                                    else -> "GEMINI CLOUD"
                                 },
                                 tone = "ACTIVE"
                             )
@@ -505,7 +506,9 @@ fun ProcessingScreen(
 
                 // Privacy & Quota / Engine reminder
                 item {
-                    if (currentProject.engineMode == EngineMode.ON_DEVICE_FREE) {
+                    if (currentProject.engineMode == EngineMode.ON_DEVICE_FREE ||
+                        currentProject.engineMode == EngineMode.ON_DEVICE_LLM
+                    ) {
                         StudioDisclosureCard(
                             title = stringResource(R.string.privacy_notice_title),
                             body = stringResource(R.string.privacy_notice_body),

@@ -10,6 +10,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.ai.GeminiDubbingService
 import com.example.ai.HindiVoicePresets
+import com.example.ai.LocalLlmModelManager
 import com.example.ai.OnDeviceDubbingEngine
 import com.example.ai.OnDeviceModelManager
 import com.example.data.local.ChunkEntity
@@ -18,6 +19,7 @@ import com.example.data.local.DialogueSegmentEntity
 import com.example.data.local.DubbingRepository
 import com.example.data.local.EngineMode
 import com.example.data.local.MovieProjectEntity
+import com.example.data.local.PreferencesRepository
 import com.example.data.local.ProcessingStage
 import com.example.data.local.ProjectStatus
 import com.example.data.local.SegmentStatus
@@ -35,6 +37,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -67,6 +70,7 @@ class ProjectStudioViewModel(
 ) : AndroidViewModel(application) {
 
     private val repository = DubbingRepository(application)
+    private val preferencesRepository = PreferencesRepository(application)
     private val scheduler = DubbingWorkScheduler(application)
     private val aiService = GeminiDubbingService()
     private val onDeviceEngine = OnDeviceDubbingEngine(application)
@@ -98,6 +102,9 @@ class ProjectStudioViewModel(
     private val _regeneratingSegmentId = MutableStateFlow<Long?>(null)
     val regeneratingSegmentId: StateFlow<Long?> = _regeneratingSegmentId.asStateFlow()
 
+    private val _activeGgufModelName = MutableStateFlow<String?>(null)
+    val activeGgufModelName: StateFlow<String?> = _activeGgufModelName.asStateFlow()
+
     private val _statusBanner = MutableStateFlow<String?>(null)
     val statusBanner: StateFlow<String?> = _statusBanner.asStateFlow()
 
@@ -106,6 +113,7 @@ class ProjectStudioViewModel(
 
     init {
         refreshTempSize()
+        refreshActiveGgufModel()
     }
 
     fun clearBanner() {
@@ -115,6 +123,16 @@ class ProjectStudioViewModel(
     fun refreshTempSize() {
         viewModelScope.launch {
             _tempBytes.value = repository.getTempWorkspaceSizeBytes(projectId)
+        }
+    }
+
+    fun refreshActiveGgufModel() {
+        viewModelScope.launch {
+            val preferred = preferencesRepository.preferencesFlow.first().activeGgufModelFileName
+            val resolved = withContext(Dispatchers.IO) {
+                LocalLlmModelManager.resolveActiveModelFile(getApplication(), preferred)?.name
+            }
+            _activeGgufModelName.value = resolved
         }
     }
 
@@ -206,7 +224,7 @@ class ProjectStudioViewModel(
                     "vp_${proj.engineMode}_${preset.id}_${speedKey}_${emotion}_$textHash.wav"
                 )
                 if (!previewWav.exists() || previewWav.length() <= 44L) {
-                    if (proj.engineMode == EngineMode.ON_DEVICE_FREE) {
+                    if (proj.engineMode == EngineMode.ON_DEVICE_FREE || proj.engineMode == EngineMode.ON_DEVICE_LLM) {
                         onDeviceEngine.generateHindiTts(
                             hindiText = line,
                             voicePresetName = preset.id,
@@ -469,8 +487,14 @@ class ProjectStudioViewModel(
     fun startOrResumeDubbing() {
         viewModelScope.launch {
             val proj = repository.getProject(projectId) ?: return@launch
-            val needsNetwork = proj.engineMode != EngineMode.ON_DEVICE_FREE ||
-                !OnDeviceModelManager.isOfflineModelsDownloaded(getApplication())
+            val app = getApplication<Application>()
+            val preferredGguf = preferencesRepository.preferencesFlow.first().activeGgufModelFileName
+            val needsNetwork = when (proj.engineMode) {
+                EngineMode.ON_DEVICE_FREE -> !OnDeviceModelManager.isOfflineModelsDownloaded(app)
+                EngineMode.ON_DEVICE_LLM -> !OnDeviceModelManager.isVoskModelReady(app) ||
+                    !withContext(Dispatchers.IO) { LocalLlmModelManager.hasReadyModel(app, preferredGguf) }
+                else -> true
+            }
             repository.updateProjectProgress(
                 projectId = projectId,
                 status = ProjectStatus.PROCESSING,
@@ -519,8 +543,14 @@ class ProjectStudioViewModel(
     fun retryFailedSegments() {
         viewModelScope.launch {
             val proj = repository.getProject(projectId)
-            val needsNetwork = proj?.engineMode != EngineMode.ON_DEVICE_FREE ||
-                !OnDeviceModelManager.isOfflineModelsDownloaded(getApplication())
+            val app = getApplication<Application>()
+            val preferredGguf = preferencesRepository.preferencesFlow.first().activeGgufModelFileName
+            val needsNetwork = when (proj?.engineMode) {
+                EngineMode.ON_DEVICE_FREE -> !OnDeviceModelManager.isOfflineModelsDownloaded(app)
+                EngineMode.ON_DEVICE_LLM -> !OnDeviceModelManager.isVoskModelReady(app) ||
+                    !withContext(Dispatchers.IO) { LocalLlmModelManager.hasReadyModel(app, preferredGguf) }
+                else -> true
+            }
             repository.updateProjectProgress(
                 projectId = projectId,
                 status = ProjectStatus.PROCESSING,
@@ -583,7 +613,7 @@ class ProjectStudioViewModel(
                 val speed = (speaker?.speedMultiplier ?: segment.speechSpeed).coerceIn(0.75f, 1.35f)
                 val outWav = File(repository.ttsDir(projectId), "seg_${segment.id}_tts.wav")
 
-                val durationMs = if (proj.engineMode == EngineMode.ON_DEVICE_FREE) {
+                val durationMs = if (proj.engineMode == EngineMode.ON_DEVICE_FREE || proj.engineMode == EngineMode.ON_DEVICE_LLM) {
                     onDeviceEngine.generateHindiTts(
                         hindiText = segment.hindiText,
                         voicePresetName = voice,

@@ -46,6 +46,7 @@ kotlinxSerializationJson = "1.8.1"
 mlkitTranslate = "17.0.3"
 voskAndroid = "0.3.75"
 jna = "5.18.1"
+llamaAndroid = "0.1.1"
 
 
 [libraries]
@@ -111,6 +112,7 @@ kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-
 mlkit-translate = { group = "com.google.mlkit", name = "translate", version.ref = "mlkitTranslate" }
 vosk-android = { group = "com.alphacephei", name = "vosk-android", version.ref = "voskAndroid" }
 jna-aar = { group = "net.java.dev.jna", name = "jna", version.ref = "jna" }
+llama-android = { group = "dev.ffmpegkit-maintained", name = "llama-android", version.ref = "llamaAndroid" }
 
 
 [plugins]

@@ -22,6 +22,7 @@ import com.example.data.local.ChunkStatus
 import com.example.data.local.DialogueSegmentEntity
 import com.example.data.local.DubbingRepository
 import com.example.data.local.EngineMode
+import com.example.data.local.PreferencesRepository
 import com.example.data.local.ProcessingStage
 import com.example.data.local.ProjectStatus
 import com.example.data.local.SegmentStatus
@@ -33,6 +34,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -56,7 +58,8 @@ class DubbingWorker(
         val initialProject = repository.getProject(projectId) ?: return Result.failure()
         val actionMode = inputData.getString(KEY_ACTION_MODE) ?: MODE_FULL_PIPELINE
         val initialUseMediaProcessingType = actionMode == MODE_REMIX_ONLY ||
-            initialProject.engineMode == EngineMode.ON_DEVICE_FREE
+            initialProject.engineMode == EngineMode.ON_DEVICE_FREE ||
+            initialProject.engineMode == EngineMode.ON_DEVICE_LLM
 
         safeSetForeground(
             createForegroundInfo(
@@ -134,10 +137,12 @@ class DubbingWorker(
             chunks = repository.getChunks(projectId)
         }
 
-        val useOnDevice = project.engineMode == EngineMode.ON_DEVICE_FREE
+        val useLocalLlm = project.engineMode == EngineMode.ON_DEVICE_LLM
+        val useOnDevice = project.engineMode == EngineMode.ON_DEVICE_FREE || useLocalLlm
+        var activeGgufFile: File? = null
         if (useOnDevice) {
             var lastReported = ""
-            onDeviceEngine.ensureReady { statusMsg ->
+            val reportStatus: (String) -> Unit = { statusMsg ->
                 if (statusMsg != lastReported) {
                     lastReported = statusMsg
                     runCatching {
@@ -162,6 +167,12 @@ class DubbingWorker(
                         )
                     }
                 }
+            }
+            if (useLocalLlm) {
+                val preferredGguf = PreferencesRepository(applicationContext).preferencesFlow.first().activeGgufModelFileName
+                activeGgufFile = onDeviceEngine.ensureReadyForLocalLlm(preferredGguf, reportStatus)
+            } else {
+                onDeviceEngine.ensureReady(reportStatus)
             }
         }
 
@@ -322,10 +333,27 @@ class DubbingWorker(
                 project = repository.getProject(projectId) ?: project
                 val speakers = repository.getSpeakers(projectId)
                 if (untranslated.isNotEmpty()) {
-                    val translations = if (useOnDevice) {
-                        onDeviceEngine.translateToHindi(untranslated)
-                    } else {
-                        callWithRateLimitRetry {
+                    val translations = when {
+                        useLocalLlm && activeGgufFile != null -> {
+                            updateStage(
+                                projectId = projectId,
+                                title = project.title,
+                                stage = "Local GGUF LLM Translating (${chunk.chunkIndex + 1}/$totalChunks)",
+                                chunkIndex = chunk.chunkIndex,
+                                totalChunks = totalChunks,
+                                subStepFraction = 0.48f,
+                                completedTimes = completedChunkTimes,
+                                useMediaProcessingType = true
+                            )
+                            onDeviceEngine.translateToHindiWithLocalLlm(
+                                segments = untranslated,
+                                speakers = speakers,
+                                dialogueStyle = project.dialogueStyle,
+                                modelFile = activeGgufFile
+                            )
+                        }
+                        useOnDevice -> onDeviceEngine.translateToHindi(untranslated)
+                        else -> callWithRateLimitRetry {
                             aiService.translateToHindi(
                                 segments = untranslated,
                                 speakers = speakers,

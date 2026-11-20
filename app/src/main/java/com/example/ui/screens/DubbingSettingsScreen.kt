@@ -98,6 +98,7 @@ import java.util.Locale
 fun DubbingSettingsScreen(
     viewModel: ProjectStudioViewModel,
     onBack: () -> Unit,
+    onOpenSettings: () -> Unit = {},
     onNextAudioSettings: () -> Unit
 ) {
     val context = LocalContext.current
@@ -105,11 +106,16 @@ fun DubbingSettingsScreen(
     val speakers by viewModel.speakers.collectAsStateWithLifecycle()
     val playbackState by viewModel.playbackState.collectAsStateWithLifecycle()
     val voicePreviewState by viewModel.voicePreviewState.collectAsStateWithLifecycle()
+    val activeGgufModelName by viewModel.activeGgufModelName.collectAsStateWithLifecycle()
     val banner by viewModel.statusBanner.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
 
     var genderFilter by remember { mutableStateOf("ALL") }
     var auditionText by remember { mutableStateOf("") }
+
+    LaunchedEffect(Unit) {
+        viewModel.refreshActiveGgufModel()
+    }
 
     LaunchedEffect(banner) {
         if (!banner.isNullOrBlank()) {
@@ -200,6 +206,19 @@ fun DubbingSettingsScreen(
                                     modifier = Modifier.testTag("engine_on_device_chip")
                                 )
                                 FilterChip(
+                                    selected = currentProject.engineMode == EngineMode.ON_DEVICE_LLM,
+                                    onClick = {
+                                        viewModel.refreshActiveGgufModel()
+                                        viewModel.updateDubbingSettings(engineMode = EngineMode.ON_DEVICE_LLM)
+                                    },
+                                    label = { Text("Local GGUF LLM (Uncensored Offline ₹0)") },
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = SaffronContainer,
+                                        selectedLabelColor = SaffronGold
+                                    ),
+                                    modifier = Modifier.testTag("engine_local_llm_chip")
+                                )
+                                FilterChip(
                                     selected = currentProject.engineMode == EngineMode.GEMINI_CLOUD,
                                     onClick = { viewModel.updateDubbingSettings(engineMode = EngineMode.GEMINI_CLOUD) },
                                     label = { Text("Gemini Cloud AI (Optional)") },
@@ -212,14 +231,77 @@ fun DubbingSettingsScreen(
                             }
                             Spacer(modifier = Modifier.height(6.dp))
                             Text(
-                                text = if (currentProject.engineMode == EngineMode.ON_DEVICE_FREE) {
-                                    "Runs completely inside your phone using Vosk Offline STT (~40 MB), Google ML Kit EN→HI (~30 MB), DSP pitch speaker detection & Android Hindi TTS. No paid API keys or 429 limits."
-                                } else {
-                                    "Uses Firebase AI Logic Gemini cloud for cinematic dialogue & neural voices. Free-tier per-minute/daily quota limits apply."
+                                text = when (currentProject.engineMode) {
+                                    EngineMode.ON_DEVICE_FREE ->
+                                        "Runs completely inside your phone using Vosk Offline STT (~40 MB), Google ML Kit EN→HI (~30 MB), DSP pitch speaker detection & Android Hindi TTS. No paid API keys or 429 limits."
+                                    EngineMode.ON_DEVICE_LLM ->
+                                        "Uses Vosk Offline STT + a local Open-Source GGUF LLM (Qwen 2.5 / Gemma GGUF) inside your phone + Android Hindi TTS. Understands movie/adult slang & context with 0% censorship and zero internet limits."
+                                    else ->
+                                        "Uses Firebase AI Logic Gemini cloud for cinematic dialogue & neural voices. Free-tier per-minute/daily quota limits apply."
                                 },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
+
+                            if (currentProject.engineMode == EngineMode.ON_DEVICE_LLM) {
+                                Spacer(modifier = Modifier.height(10.dp))
+                                Surface(
+                                    color = ObsidianElevated,
+                                    shape = RoundedCornerShape(10.dp),
+                                    border = BorderStroke(
+                                        width = 1.dp,
+                                        color = if (activeGgufModelName != null) {
+                                            EmeraldSuccess.copy(alpha = 0.55f)
+                                        } else {
+                                            SaffronGold.copy(alpha = 0.65f)
+                                        }
+                                    )
+                                ) {
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(12.dp),
+                                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = if (activeGgufModelName != null) {
+                                                    "Active GGUF: $activeGgufModelName"
+                                                } else {
+                                                    "No GGUF model installed yet"
+                                                },
+                                                style = MaterialTheme.typography.labelMedium,
+                                                color = if (activeGgufModelName != null) EmeraldSuccess else SaffronGold,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            StatusPill(
+                                                label = if (activeGgufModelName != null) "READY" else "SETUP",
+                                                tone = if (activeGgufModelName != null) "SUCCESS" else "WARN"
+                                            )
+                                        }
+                                        OutlinedButton(
+                                            onClick = onOpenSettings,
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .height(48.dp)
+                                                .testTag("manage_gguf_from_project_button")
+                                        ) {
+                                            Text(
+                                                if (activeGgufModelName != null) {
+                                                    "Change / Test GGUF Model in Settings"
+                                                } else {
+                                                    "Download Qwen 2.5 or Import .gguf Model"
+                                                }
+                                            )
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -576,7 +658,7 @@ fun DubbingSettingsScreen(
                     item {
                         StudioDisclosureCard(
                             title = "Auto-Diarization Ready",
-                            body = if (currentProject.engineMode == EngineMode.ON_DEVICE_FREE) {
+                            body = if (currentProject.engineMode == EngineMode.ON_DEVICE_FREE || currentProject.engineMode == EngineMode.ON_DEVICE_LLM) {
                                 "Vosk + DSP Pitch Analyzer will automatically detect deeper Male vs higher Female voices (SPEAKER_1, SPEAKER_2...) inside your phone and assign Hindi TTS pitch/voice profiles. Tap 'Add' above to pre-configure slots."
                             } else {
                                 "When Gemini transcribes each audio chunk, distinct speakers (SPEAKER_1, SPEAKER_2...) will be auto-detected and assigned matching Male, Female, or Neutral Hindi voices. Tap 'Add' above to pre-configure speaker slots now."

@@ -1,7 +1,10 @@
 package com.example
 
+import com.example.ai.LocalLlmModelManager
 import com.example.ai.OnDeviceSpeakerAnalyzer
 import com.example.data.local.DialogueSegmentEntity
+import com.example.data.local.DialogueStyle
+import com.example.data.local.EngineMode
 import com.example.media.AudioMixer
 import com.example.media.AudioSeparator
 import com.example.media.MediaInspector
@@ -199,5 +202,29 @@ class AudioPipelineTest {
         assertTrue(VideoExporter.isVideoMimeMp4MuxCompatible("video/hevc"))
         assertFalse(VideoExporter.isVideoMimeMp4MuxCompatible("video/x-vnd.on2.vp9"))
         assertFalse(VideoExporter.isVideoMimeMp4MuxCompatible("video/x-vnd.on2.vp8"))
+    }
+
+    @Test
+    fun `GGUF validation rejects HTML error pages and tiny stubs`() {
+        val fakeHtml = tempFolder.newFile("bad.gguf").apply {
+            writeBytes("<html>404 Not Found</html>".toByteArray() + ByteArray(11 * 1024 * 1024))
+        }
+        val tinyGguf = tempFolder.newFile("tiny.gguf").apply {
+            writeBytes(byteArrayOf('G'.code.toByte(), 'G'.code.toByte(), 'U'.code.toByte(), 'F'.code.toByte(), 0, 1))
+        }
+        val validHeaderOnly = tempFolder.newFile("valid.gguf").apply {
+            val bytes = ByteArray(11 * 1024 * 1024)
+            bytes[0] = 'G'.code.toByte()
+            bytes[1] = 'G'.code.toByte()
+            bytes[2] = 'U'.code.toByte()
+            bytes[3] = 'F'.code.toByte()
+            writeBytes(bytes)
+        }
+
+        assertFalse(LocalLlmModelManager.isValidGgufFile(fakeHtml))
+        assertFalse(LocalLlmModelManager.isValidGgufFile(tinyGguf))
+        assertTrue(LocalLlmModelManager.isValidGgufFile(validHeaderOnly))
+        assertTrue(EngineMode.ON_DEVICE_LLM in EngineMode.all)
+        assertTrue(DialogueStyle.RAW_UNCENSORED in DialogueStyle.all)
     }
 }

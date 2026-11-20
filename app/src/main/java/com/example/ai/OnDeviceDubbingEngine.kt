@@ -47,9 +47,31 @@ class OnDeviceDubbingEngine(private val context: Context) {
     private var ttsEngine: TextToSpeech? = null
     private var cachedHindiVoices: List<AndroidTtsVoice> = emptyList()
     private val ttsMutex = Mutex()
+    private val localGgufTranslator = LocalGgufTranslator()
 
     suspend fun ensureReady(onStatus: (String) -> Unit) {
         OnDeviceModelManager.ensureAllModelsReady(context, onStatus)
+    }
+
+    suspend fun ensureReadyForLocalLlm(
+        preferredGgufFileName: String?,
+        onStatus: (String) -> Unit
+    ): File {
+        if (!OnDeviceModelManager.isVoskModelReady(context)) {
+            OnDeviceModelManager.downloadAndExtractVoskModel(context, onStatus)
+        }
+        val (ttsReady, _, ttsNote) = OnDeviceModelManager.checkAndroidHindiTts(context)
+        if (!ttsReady) {
+            throw IllegalStateException(
+                "Android Hindi Text-to-Speech voice data is not ready on this phone ($ttsNote). " +
+                    "Tap 'Install Hindi TTS Voice' or enable Google Speech Services in Android Settings."
+            )
+        }
+        onStatus("Verifying local open-source GGUF LLM...")
+        return LocalLlmModelManager.resolveActiveModelFile(context, preferredGgufFileName)
+            ?: throw IllegalStateException(
+                "No Local GGUF LLM model installed yet. Open Studio Settings → Local Open-Source GGUF LLM to download Qwen 2.5 or import a .gguf file."
+            )
     }
 
     /**
@@ -116,6 +138,27 @@ class OnDeviceDubbingEngine(private val context: Context) {
             )
         }
         results
+    }
+
+    /**
+     * Context-aware offline cinema translation via local open-source GGUF model (Qwen / Gemma / Llama GGUF).
+     */
+    suspend fun translateToHindiWithLocalLlm(
+        segments: List<DialogueSegmentEntity>,
+        speakers: List<SpeakerEntity>,
+        dialogueStyle: String,
+        modelFile: File
+    ): List<TranslatedLine> = withContext(Dispatchers.IO) {
+        // Free Vosk native buffers before mapping the GGUF weights on 4-6GB RAM phones
+        runCatching { voskModel?.close() }
+        voskModel = null
+
+        localGgufTranslator.translateSegmentsWithContext(
+            modelFile = modelFile,
+            segments = segments,
+            speakers = speakers,
+            dialogueStyle = dialogueStyle
+        )
     }
 
     /**
@@ -195,6 +238,7 @@ class OnDeviceDubbingEngine(private val context: Context) {
         mlKitTranslator = null
         runCatching { ttsEngine?.shutdown() }
         ttsEngine = null
+        localGgufTranslator.releaseBlocking()
     }
 
     @Synchronized

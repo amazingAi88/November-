@@ -48,8 +48,9 @@ object DialogueStyle {
     const val CONVERSATIONAL = "Natural Conversational Hindi"
     const val CINEMATIC = "Cinematic Dramatic Hindi"
     const val CASUAL = "Casual Everyday Hindustani"
+    const val RAW_UNCENSORED = "Raw Uncensored / Adult Cinema"
 
-    val all = listOf(CONVERSATIONAL, CINEMATIC, CASUAL)
+    val all = listOf(CONVERSATIONAL, CINEMATIC, CASUAL, RAW_UNCENSORED)
 }
 
 object SeparationMode {
@@ -69,9 +70,10 @@ object ExportQuality {
 
 object EngineMode {
     const val ON_DEVICE_FREE = "ON_DEVICE_FREE"
+    const val ON_DEVICE_LLM = "ON_DEVICE_LLM"
     const val GEMINI_CLOUD = "GEMINI_CLOUD"
 
-    val all = listOf(ON_DEVICE_FREE, GEMINI_CLOUD)
+    val all = listOf(ON_DEVICE_FREE, ON_DEVICE_LLM, GEMINI_CLOUD)
 }
 
 @Entity(tableName = "movie_projects")

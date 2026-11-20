@@ -1,5 +1,7 @@
 package com.example.ui.screens
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -15,14 +17,20 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CleaningServices
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.FileOpen
+import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Security
 import androidx.compose.material3.Button
@@ -32,23 +40,31 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
@@ -56,6 +72,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.R
+import com.example.ai.LocalLlmModelManager
 import com.example.ai.OnDeviceModelManager
 import com.example.data.local.DialogueStyle
 import com.example.data.local.EngineMode
@@ -64,9 +81,15 @@ import com.example.media.WavUtils
 import com.example.ui.components.StatusPill
 import com.example.ui.components.StudioDisclosureCard
 import com.example.ui.components.StudioTopBar
+import com.example.ui.theme.ElectricCyan
+import com.example.ui.theme.EmeraldContainer
+import com.example.ui.theme.EmeraldSuccess
+import com.example.ui.theme.ErrorCrimson
 import com.example.ui.theme.ObsidianBorder
+import com.example.ui.theme.ObsidianElevated
 import com.example.ui.theme.ObsidianNight
 import com.example.ui.theme.ObsidianSurface
+import com.example.ui.theme.ObsidianSurfaceVariant
 import com.example.ui.theme.SaffronContainer
 import com.example.ui.theme.SaffronGold
 import com.example.ui.viewmodel.SettingsViewModel
@@ -84,12 +107,31 @@ fun SettingsScreen(
     val modelsStatus by viewModel.modelsStatus.collectAsStateWithLifecycle()
     val isManagingModels by viewModel.isManagingModels.collectAsStateWithLifecycle()
     val modelProgressText by viewModel.modelProgressText.collectAsStateWithLifecycle()
+
+    val installedGgufModels by viewModel.installedGgufModels.collectAsStateWithLifecycle()
+    val deviceRamGb by viewModel.deviceRamGb.collectAsStateWithLifecycle()
+    val isManagingGguf by viewModel.isManagingGguf.collectAsStateWithLifecycle()
+    val ggufProgress by viewModel.ggufProgress.collectAsStateWithLifecycle()
+    val ggufProgressText by viewModel.ggufProgressText.collectAsStateWithLifecycle()
+    val sampleTestOutput by viewModel.sampleTestOutput.collectAsStateWithLifecycle()
+    val isTestingSample by viewModel.isTestingSample.collectAsStateWithLifecycle()
+
     val message by viewModel.message.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
+    var testDialogueInput by remember { mutableStateOf("What the hell are you doing, man?") }
+
+    val ggufPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            viewModel.importCustomGguf(uri)
+        }
+    }
 
     LaunchedEffect(Unit) {
         viewModel.refreshTempSize()
         viewModel.refreshModelsStatus()
+        viewModel.refreshGgufModels()
     }
 
     LaunchedEffect(message) {
@@ -105,7 +147,7 @@ fun SettingsScreen(
         topBar = {
             StudioTopBar(
                 title = "Studio Settings",
-                subtitle = "Defaults, Storage & API Transparency",
+                subtitle = "Defaults, Offline LLM & Storage",
                 onBack = onBack
             )
         },
@@ -137,7 +179,10 @@ fun SettingsScreen(
                             verticalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
                             Text("Default Dubbing Engine", style = MaterialTheme.typography.titleMedium)
-                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
                                 FilterChip(
                                     selected = prefs.defaultEngineMode == EngineMode.ON_DEVICE_FREE,
                                     onClick = { viewModel.setEngineMode(EngineMode.ON_DEVICE_FREE) },
@@ -146,6 +191,16 @@ fun SettingsScreen(
                                         selectedContainerColor = SaffronContainer,
                                         selectedLabelColor = SaffronGold
                                     )
+                                )
+                                FilterChip(
+                                    selected = prefs.defaultEngineMode == EngineMode.ON_DEVICE_LLM,
+                                    onClick = { viewModel.setEngineMode(EngineMode.ON_DEVICE_LLM) },
+                                    label = { Text("Local GGUF LLM (Uncensored)") },
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = SaffronContainer,
+                                        selectedLabelColor = SaffronGold
+                                    ),
+                                    modifier = Modifier.testTag("default_engine_local_llm_chip")
                                 )
                                 FilterChip(
                                     selected = prefs.defaultEngineMode == EngineMode.GEMINI_CLOUD,
@@ -174,7 +229,10 @@ fun SettingsScreen(
                             }
 
                             Text("Default Dialogue Style", style = MaterialTheme.typography.titleMedium)
-                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
                                 DialogueStyle.all.forEach { style ->
                                     FilterChip(
                                         selected = prefs.defaultDialogueStyle == style,
@@ -231,6 +289,372 @@ fun SettingsScreen(
                                             selectedLabelColor = SaffronGold
                                         )
                                     )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Local Open-Source GGUF LLM Card (Uncensored & 100% Offline)
+                item {
+                    val hasValidGguf = installedGgufModels.any { it.isValidGguf }
+                    val resolvedActiveName = remember(installedGgufModels, prefs.activeGgufModelFileName) {
+                        installedGgufModels.firstOrNull { it.isValidGguf && it.fileName == prefs.activeGgufModelFileName }?.fileName
+                            ?: installedGgufModels.firstOrNull { it.isValidGguf }?.fileName
+                    }
+
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("local_gguf_llm_card"),
+                        colors = CardDefaults.cardColors(containerColor = ObsidianSurface),
+                        border = BorderStroke(1.dp, ElectricCyan.copy(alpha = 0.55f)),
+                        shape = MaterialTheme.shapes.large
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Filled.Memory,
+                                        contentDescription = null,
+                                        tint = ElectricCyan
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Column {
+                                        Text(
+                                            "Local Open-Source GGUF LLM",
+                                            style = MaterialTheme.typography.titleMedium
+                                        )
+                                        Text(
+                                            "100% offline, unfiltered scene-context Hindi translation",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                                StatusPill(
+                                    label = if (hasValidGguf) "READY" else "SETUP NEEDED",
+                                    tone = if (hasValidGguf) "SUCCESS" else "WARN"
+                                )
+                            }
+
+                            Surface(
+                                color = ObsidianElevated,
+                                shape = RoundedCornerShape(10.dp),
+                                border = BorderStroke(1.dp, ObsidianBorder)
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "Phone Memory: ${String.format(Locale.US, "%.1f", deviceRamGb)} GB RAM",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = ElectricCyan
+                                    )
+                                    Text(
+                                        text = if (deviceRamGb >= 5.5f) "1.5B Model Supported" else "0.5B Lite Recommended",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+
+                            Text(
+                                text = "Runs Qwen 2.5, Gemma, or any custom .gguf file directly on your phone CPU. Understands Bollywood/OTT slang and raw adult dialogue context without cloud censorship or API quotas.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+
+                            if (ggufProgress != null) {
+                                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    LinearProgressIndicator(
+                                        progress = { ggufProgress!!.coerceIn(0f, 1f) },
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(6.dp)
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .testTag("gguf_download_progress"),
+                                        color = ElectricCyan,
+                                        trackColor = ObsidianSurfaceVariant
+                                    )
+                                    if (!ggufProgressText.isNullOrBlank()) {
+                                        Text(
+                                            text = ggufProgressText!!,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = ElectricCyan
+                                        )
+                                    }
+                                }
+                            }
+
+                            // Curated Open-Source Presets
+                            LocalLlmModelManager.PRESETS.forEach { preset ->
+                                val installed = installedGgufModels.firstOrNull { it.fileName == preset.fileName && it.isValidGguf }
+                                val isActive = resolvedActiveName == preset.fileName
+                                val recommendedForPhone = (deviceRamGb >= 5.5f && preset.minRamGb >= 6) ||
+                                    (deviceRamGb < 5.5f && preset.minRamGb <= 4)
+
+                                Surface(
+                                    color = ObsidianElevated,
+                                    shape = MaterialTheme.shapes.medium,
+                                    border = BorderStroke(
+                                        width = 1.dp,
+                                        color = if (isActive) EmeraldSuccess.copy(alpha = 0.65f) else ObsidianBorder
+                                    )
+                                ) {
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(12.dp),
+                                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(preset.displayName, style = MaterialTheme.typography.titleSmall)
+                                                Text(
+                                                    text = "~${preset.approxSizeMb} MB • Min ${preset.minRamGb}GB RAM",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = SaffronGold
+                                                )
+                                            }
+                                            if (installed != null) {
+                                                StatusPill(
+                                                    label = if (isActive) "ACTIVE" else "INSTALLED",
+                                                    tone = if (isActive) "SUCCESS" else "ACTIVE"
+                                                )
+                                            } else if (recommendedForPhone) {
+                                                StatusPill(label = "RECOMMENDED", tone = "ACTIVE")
+                                            }
+                                        }
+                                        Text(
+                                            text = preset.description,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            if (installed == null) {
+                                                Button(
+                                                    onClick = { viewModel.downloadGgufPreset(preset) },
+                                                    enabled = !isManagingGguf,
+                                                    modifier = Modifier
+                                                        .weight(1f)
+                                                        .height(48.dp)
+                                                        .testTag("download_gguf_${preset.id}"),
+                                                    colors = ButtonDefaults.buttonColors(
+                                                        containerColor = ElectricCyan,
+                                                        contentColor = ObsidianNight
+                                                    )
+                                                ) {
+                                                    Icon(Icons.Filled.CloudDownload, contentDescription = null)
+                                                    Spacer(modifier = Modifier.width(6.dp))
+                                                    Text("Download (~${preset.approxSizeMb} MB)")
+                                                }
+                                            } else {
+                                                if (!isActive) {
+                                                    OutlinedButton(
+                                                        onClick = { viewModel.selectActiveGguf(preset.fileName) },
+                                                        enabled = !isManagingGguf,
+                                                        modifier = Modifier
+                                                            .weight(1f)
+                                                            .height(48.dp)
+                                                    ) {
+                                                        Text("Use This Model")
+                                                    }
+                                                } else {
+                                                    Surface(
+                                                        modifier = Modifier
+                                                            .weight(1f)
+                                                            .height(48.dp),
+                                                        color = EmeraldContainer.copy(alpha = 0.35f),
+                                                        shape = MaterialTheme.shapes.small,
+                                                        border = BorderStroke(1.dp, EmeraldSuccess.copy(alpha = 0.5f))
+                                                    ) {
+                                                        Row(
+                                                            modifier = Modifier.fillMaxSize(),
+                                                            horizontalArrangement = Arrangement.Center,
+                                                            verticalAlignment = Alignment.CenterVertically
+                                                        ) {
+                                                            Icon(
+                                                                Icons.Filled.Check,
+                                                                contentDescription = null,
+                                                                tint = EmeraldSuccess,
+                                                                modifier = Modifier.size(18.dp)
+                                                            )
+                                                            Spacer(modifier = Modifier.width(6.dp))
+                                                            Text(
+                                                                "Active Offline LLM",
+                                                                style = MaterialTheme.typography.labelLarge,
+                                                                color = EmeraldSuccess
+                                                            )
+                                                        }
+                                                    }
+                                                }
+                                                IconButton(
+                                                    onClick = { viewModel.deleteGgufModel(preset.fileName) },
+                                                    enabled = !isManagingGguf,
+                                                    modifier = Modifier.size(48.dp)
+                                                ) {
+                                                    Icon(
+                                                        Icons.Filled.DeleteOutline,
+                                                        contentDescription = "Delete ${preset.fileName}",
+                                                        tint = ErrorCrimson
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Custom GGUF Importer (e.g. Gemma / Llama / Mistral / Uncensored GGUF from device storage)
+                            OutlinedButton(
+                                onClick = { ggufPickerLauncher.launch(arrayOf("*/*")) },
+                                enabled = !isManagingGguf,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(48.dp)
+                                    .testTag("import_custom_gguf_button")
+                            ) {
+                                Icon(Icons.Filled.FileOpen, contentDescription = null, tint = SaffronGold)
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Import Custom .gguf File (Gemma / Qwen / Llama)")
+                            }
+
+                            // Custom imported .gguf models not part of built-in presets
+                            val customModels = installedGgufModels.filter { model ->
+                                LocalLlmModelManager.PRESETS.none { it.fileName == model.fileName }
+                            }
+                            if (customModels.isNotEmpty()) {
+                                HorizontalDivider(color = ObsidianBorder)
+                                Text("Custom Imported Models", style = MaterialTheme.typography.labelLarge)
+                                customModels.forEach { custom ->
+                                    val isActive = resolvedActiveName == custom.fileName
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(custom.fileName, style = MaterialTheme.typography.bodyMedium)
+                                            Text(
+                                                text = "${WavUtils.formatFileSize(custom.sizeBytes)} • ${if (custom.isValidGguf) "Valid GGUF" else "Invalid GGUF"}",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = if (custom.isValidGguf) MaterialTheme.colorScheme.onSurfaceVariant else ErrorCrimson
+                                            )
+                                        }
+                                        if (custom.isValidGguf) {
+                                            FilterChip(
+                                                selected = isActive,
+                                                onClick = { viewModel.selectActiveGguf(custom.fileName) },
+                                                label = { Text(if (isActive) "Active" else "Select") },
+                                                colors = FilterChipDefaults.filterChipColors(
+                                                    selectedContainerColor = EmeraldContainer,
+                                                    selectedLabelColor = EmeraldSuccess
+                                                )
+                                            )
+                                        }
+                                        IconButton(
+                                            onClick = { viewModel.deleteGgufModel(custom.fileName) },
+                                            enabled = !isManagingGguf,
+                                            modifier = Modifier.size(48.dp)
+                                        ) {
+                                            Icon(
+                                                Icons.Filled.DeleteOutline,
+                                                contentDescription = "Delete ${custom.fileName}",
+                                                tint = ErrorCrimson
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Quick Live Test Box when at least one valid GGUF is ready
+                            if (hasValidGguf) {
+                                HorizontalDivider(color = ObsidianBorder)
+                                Text("Test GGUF Hindi Dubbing (${prefs.defaultDialogueStyle})", style = MaterialTheme.typography.titleSmall)
+                                OutlinedTextField(
+                                    value = testDialogueInput,
+                                    onValueChange = { testDialogueInput = it },
+                                    label = { Text("Sample English Movie Line") },
+                                    singleLine = true,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("test_gguf_input")
+                                )
+                                Button(
+                                    onClick = {
+                                        viewModel.testGgufSample(testDialogueInput, prefs.defaultDialogueStyle)
+                                    },
+                                    enabled = !isTestingSample && testDialogueInput.isNotBlank(),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(48.dp)
+                                        .testTag("test_gguf_translate_button"),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = SaffronGold,
+                                        contentColor = MaterialTheme.colorScheme.onPrimary
+                                    )
+                                ) {
+                                    if (isTestingSample) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(18.dp),
+                                            strokeWidth = 2.dp,
+                                            color = MaterialTheme.colorScheme.onPrimary
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text("Running Local GGUF Model...")
+                                    } else {
+                                        Icon(Icons.Filled.PlayArrow, contentDescription = null)
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text("Test Translate Offline")
+                                    }
+                                }
+
+                                sampleTestOutput?.let { res ->
+                                    Surface(
+                                        color = ObsidianElevated,
+                                        shape = MaterialTheme.shapes.medium,
+                                        border = BorderStroke(1.dp, EmeraldSuccess.copy(alpha = 0.55f))
+                                    ) {
+                                        Column(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(12.dp),
+                                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                                        ) {
+                                            Text(
+                                                text = res.hindiText,
+                                                style = MaterialTheme.typography.titleSmall,
+                                                color = EmeraldSuccess
+                                            )
+                                            Text(
+                                                text = String.format(Locale.US, "Speed: %.1f tokens/sec • 100%% Offline", res.tokensPerSecond),
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -309,6 +733,7 @@ fun SettingsScreen(
                                     enabled = !isManagingModels,
                                     modifier = Modifier
                                         .weight(1f)
+                                        .height(48.dp)
                                         .testTag("download_on_device_models_button"),
                                     colors = ButtonDefaults.buttonColors(
                                         containerColor = SaffronGold,
@@ -321,7 +746,8 @@ fun SettingsScreen(
                                 }
                                 OutlinedButton(
                                     onClick = { viewModel.deleteOnDeviceModels() },
-                                    enabled = !isManagingModels && (modelsStatus?.voskDownloaded == true || modelsStatus?.mlKitHindiDownloaded == true)
+                                    enabled = !isManagingModels && (modelsStatus?.voskDownloaded == true || modelsStatus?.mlKitHindiDownloaded == true),
+                                    modifier = Modifier.height(48.dp)
                                 ) {
                                     Icon(Icons.Filled.DeleteOutline, contentDescription = null)
                                     Spacer(modifier = Modifier.width(4.dp))
@@ -334,7 +760,9 @@ fun SettingsScreen(
                                     onClick = {
                                         OnDeviceModelManager.openTtsSettings(context)
                                     },
-                                    modifier = Modifier.fillMaxWidth()
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(48.dp)
                                 ) {
                                     Text("Install Android Hindi TTS Voice Pack")
                                 }
@@ -366,7 +794,9 @@ fun SettingsScreen(
                             Spacer(modifier = Modifier.width(8.dp))
                             OutlinedButton(
                                 onClick = { viewModel.cleanAllTempFiles() },
-                                modifier = Modifier.testTag("settings_clean_all_temp_button")
+                                modifier = Modifier
+                                    .height(48.dp)
+                                    .testTag("settings_clean_all_temp_button")
                             ) {
                                 Icon(Icons.Filled.CleaningServices, contentDescription = null)
                                 Spacer(modifier = Modifier.width(4.dp))
