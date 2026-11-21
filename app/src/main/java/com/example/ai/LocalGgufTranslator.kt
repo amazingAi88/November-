@@ -309,24 +309,28 @@ class LocalGgufTranslator {
 
         var candidate = extractBestHindiLine(primaryRaw)
 
-        // If GGUF refused or produced non-Devanagari text, retry once using neutral placeholder tokens
-        if (isRefusalOrMissingHindi(candidate)) {
-            Log.d(TAG, "Retrying segment ${seg.id} with protected tokens (raw was: ${primaryRaw.take(60)})")
+        // If GGUF refused, produced non-Devanagari text, or looped/echoed prompt junk, retry cleanly
+        if (isRefusalOrMissingHindi(candidate) || hasRepetitiveLoopOrGarbage(candidate, seg.englishText)) {
+            Log.d(TAG, "Retrying segment ${seg.id} with protected clean prompt (raw was: ${primaryRaw.take(60)})")
             val protectedRaw = runCatching {
                 retryWithProtectedPromptLocked(handle, prep.protectedEnglish)
             }.getOrDefault("")
             val protectedClean = extractBestHindiLine(protectedRaw)
-            if (!isRefusalOrMissingHindi(protectedClean)) {
+            if (!isRefusalOrMissingHindi(protectedClean) && !hasRepetitiveLoopOrGarbage(protectedClean, seg.englishText)) {
                 candidate = SlangDictionaryManager.restoreAndOverride(protectedClean, prep)
+            } else {
+                candidate = ""
             }
         }
 
-        // Final safety net: use protected ML Kit fallback if GGUF still failed/refused
-        if (isRefusalOrMissingHindi(candidate) && fallbackTranslator != null) {
+        // Final safety net: use protected ML Kit fallback if GGUF still failed, refused, or looped
+        if ((isRefusalOrMissingHindi(candidate) || hasRepetitiveLoopOrGarbage(candidate, seg.englishText)) &&
+            fallbackTranslator != null
+        ) {
             val mlKitHindi = runCatching { fallbackTranslator(prep.protectedEnglish) }.getOrNull()
             if (!mlKitHindi.isNullOrBlank()) {
                 val restored = SlangDictionaryManager.restoreAndOverride(mlKitHindi, prep)
-                if (containsDevanagari(restored)) {
+                if (containsDevanagari(restored) && !hasRepetitiveLoopOrGarbage(restored, seg.englishText)) {
                     candidate = restored
                 }
             }
@@ -347,9 +351,9 @@ class LocalGgufTranslator {
         val wordCount = protectedEnglish.trim().split(Regex("\\s+")).size
         val res = Llama.complete(
             handle,
-            prompt = "Translate to natural spoken Hindi (Devanagari script only, keep any ZXQ tokens unchanged):\n\"$protectedEnglish\"",
-            systemPrompt = "Translate English text into spoken Hindi in Devanagari script. Keep tokens like ZXQ0QXZ exact.",
-            maxTokens = (wordCount * 3 + 28).coerceIn(40, 96)
+            prompt = "English: \"$protectedEnglish\"\nHindi:",
+            systemPrompt = "Translate English text into spoken Hindi in Devanagari script only. Preserve ZXQ tokens exactly. Never repeat phrases.",
+            maxTokens = (wordCount * 3 + 24).coerceIn(36, 90)
         )
         return res.text
     }
@@ -357,7 +361,7 @@ class LocalGgufTranslator {
     private fun buildCinemaSystemPrompt(dialogueStyle: String): String {
         val styleNote = when (dialogueStyle) {
             DialogueStyle.RAW_UNCENSORED ->
-                "Style: Raw Uncensored OTT & Adult Hindi. Keep street slang, curses, and intimacy raw and natural (never replace profanity with polite words like 'लानत' or 'मूर्ख')."
+                "Style: Raw Uncensored Adult & Street Hindi. Keep street slang, curses, and intimacy raw and natural; never censor profanity into polite words."
             DialogueStyle.CINEMATIC ->
                 "Style: Dramatic Bollywood Hindi. Punchy and emotional."
             DialogueStyle.CASUAL ->
@@ -365,10 +369,10 @@ class LocalGgufTranslator {
             else ->
                 "Style: Natural spoken Hindi movie dubbing."
         }
-        return "You are a professional Hindi film dubbing translator. $styleNote Reply ONLY with the spoken Hindi translation in Devanagari script. No English, no notes, no quotes."
+        return "You are a professional Hindi film dubbing translator. $styleNote Reply ONLY with the spoken Hindi translation in Devanagari script. Never repeat words or invent unrelated lines."
     }
 
-    private fun buildSingleLinePrompt(
+    internal fun buildSingleLinePrompt(
         englishLine: String,
         prevEnglish: String?,
         speakerGender: String?,
@@ -376,32 +380,32 @@ class LocalGgufTranslator {
         glossaryHints: String,
         dialogueStyle: String
     ): String = buildString {
-        if (dialogueStyle == DialogueStyle.RAW_UNCENSORED) {
-            appendLine("Ex: \"Get the hell out!\" -> \"दफ़ा हो जा यहाँ से!\"")
-        } else {
-            appendLine("Ex: \"Wait for me.\" -> \"मेरे लिए रुको।\"")
-        }
         if (glossaryHints.isNotBlank()) {
             appendLine(glossaryHints)
         }
         if (!prevEnglish.isNullOrBlank()) {
-            appendLine("Prev: \"${prevEnglish.take(55)}\"")
+            appendLine("Previous context (do not translate): \"${prevEnglish.take(55)}\"")
         }
         if (!speakerGender.isNullOrBlank() && speakerGender != "NEUTRAL") {
-            val moodPart = if (!emotion.isNullOrBlank() && emotion != "neutral") ",$emotion" else ""
-            appendLine("Spk:$speakerGender$moodPart")
+            val moodPart = if (!emotion.isNullOrBlank() && emotion != "neutral") ", $emotion" else ""
+            appendLine("Speaker: $speakerGender$moodPart")
         }
-        append("HI: \"$englishLine\"")
+        append("Translate ONLY this English line into Hindi (Devanagari only):\nEnglish: \"$englishLine\"\nHindi:")
     }
 
     companion object {
         private val THINK_BLOCK_REGEX = Regex("""<think>[\s\S]*?</think>""", RegexOption.IGNORE_CASE)
-        private val LINE_PREFIX_REGEX = Regex("""^\s*(?:[-*•]+|\d+[\.\)\:\-]+|(?:Hindi|Translation|Output|Dialogue)\s*:)\s*""", RegexOption.IGNORE_CASE)
+        private val LINE_PREFIX_REGEX = Regex("""^\s*(?:[-*•]+|\d+[\.\)\:\-]+|(?:Hindi|Translation|Output|Dialogue|English)\s*:)\s*""", RegexOption.IGNORE_CASE)
+        private val DASH_LOOP_SPLIT_REGEX = Regex("""\s*(?:-+\s*-+|—|–)\s*""")
         private val DEVANAGARI_REGEX = Regex("""[\u0900-\u097F]""")
         private val REFUSAL_PATTERNS = listOf(
             "i cannot", "i can't", "i am unable", "i'm sorry", "as an ai",
             "explicit content", "inappropriate", "cannot fulfill", "cannot translate",
             "against my", "offensive", "nsfw", "sexual content"
+        )
+        private val PROMPT_LEAK_PATTERNS = listOf(
+            "translate only", "previous context", "local json slang", "do not translate",
+            "speaker:", "english:", "style:", "hindi:"
         )
 
         private val FAST_SHORT_UTTERANCES = mapOf(
@@ -415,12 +419,6 @@ class LocalGgufTranslator {
             "alright" to "ठीक है",
             "fine" to "ठीक है",
             "good" to "अच्छा",
-            "oh" to "ओह",
-            "uh" to "अह",
-            "um" to "हम्म्म",
-            "hmm" to "हम्म्म",
-            "huh" to "हैं",
-            "ah" to "आह",
             "hey" to "अरे",
             "hi" to "हाय",
             "hello" to "नमस्ते",
@@ -438,9 +436,7 @@ class LocalGgufTranslator {
             "right" to "सही है",
             "come on" to "चलो भी",
             "let's go" to "चलो चलें",
-            "shut up" to "बकवास बंद कर",
-            "oh god" to "हे भगवान",
-            "oh my god" to "हे भगवान"
+            "shut up" to "बकवास बंद कर"
         )
 
         private val SLANG_OR_COMPLEX_REGEX = Regex(
@@ -463,8 +459,6 @@ class LocalGgufTranslator {
             if (hasDictMatch) return true
             val trimmed = englishText.trim()
             if (trimmed.isEmpty()) return false
-            val wordCount = trimmed.split(Regex("\\s+")).count { it.isNotBlank() }
-            if (wordCount > 12) return true
             if (SLANG_OR_COMPLEX_REGEX.containsMatchIn(trimmed)) return true
             if (dialogueStyle == DialogueStyle.RAW_UNCENSORED) {
                 val combined = "$prevText $trimmed $nextText"
@@ -490,7 +484,64 @@ class LocalGgufTranslator {
             if (text.isBlank()) return true
             val lower = text.lowercase(Locale.US)
             if (REFUSAL_PATTERNS.any { lower.contains(it) }) return true
+            if (PROMPT_LEAK_PATTERNS.any { lower.contains(it) }) return true
             return !containsDevanagari(text)
+        }
+
+        internal fun hasRepetitiveLoopOrGarbage(hindi: String, englishText: String = ""): Boolean {
+            val trimmed = hindi.trim()
+            if (trimmed.isEmpty()) return true
+            val lower = trimmed.lowercase(Locale.US)
+            if (PROMPT_LEAK_PATTERNS.any { lower.contains(it) }) return true
+
+            // Check repeated chunks around dash/loop artifacts like "हो यहाँ से! - - हो यहाँ से!"
+            val dashParts = DASH_LOOP_SPLIT_REGEX.split(trimmed)
+                .map { it.trim().trim('"', '\'', '!', '?', '।', '.') }
+                .filter { it.isNotBlank() }
+            if (dashParts.size >= 2 && dashParts.distinct().size < dashParts.size) {
+                return true
+            }
+
+            val tokens = trimmed.split(Regex("""[\s,।.!?\-—"']+"""))
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+            if (tokens.isEmpty()) return true
+
+            // Same word repeated 3+ times consecutively
+            for (i in 0..tokens.size - 3) {
+                if (tokens[i] == tokens[i + 1] && tokens[i + 1] == tokens[i + 2]) {
+                    return true
+                }
+            }
+
+            // Repeated 2-word bigram in a short output
+            if (tokens.size >= 4) {
+                val bigrams = mutableSetOf<String>()
+                var bigramRepeats = 0
+                for (i in 0 until tokens.size - 1) {
+                    val bg = "${tokens[i]} ${tokens[i + 1]}"
+                    if (!bigrams.add(bg)) {
+                        bigramRepeats++
+                    }
+                }
+                if (bigramRepeats >= 2 || (tokens.size <= 10 && bigramRepeats >= 1)) {
+                    return true
+                }
+            }
+
+            // Low vocabulary diversity across 6+ word output
+            if (tokens.size >= 6) {
+                val uniqueRatio = tokens.distinct().size.toFloat() / tokens.size.toFloat()
+                if (uniqueRatio < 0.55f) return true
+            }
+
+            // Severe length mismatch check when translating long English sentences into tiny stub loops
+            val engWords = englishText.trim().split(Regex("\\s+")).count { it.isNotBlank() }
+            if (engWords >= 12 && tokens.size <= 2 && !englishText.contains("fuck", ignoreCase = true)) {
+                return true
+            }
+
+            return false
         }
 
         internal fun extractBestHindiLine(raw: String): String {
@@ -510,9 +561,13 @@ class LocalGgufTranslator {
                 .filter { it.isNotBlank() }
 
             if (candidates.isEmpty()) return ""
-            // Prefer the first line that actually contains Hindi Devanagari script
-            val devanagariLine = candidates.firstOrNull { containsDevanagari(it) && !REFUSAL_PATTERNS.any { r -> it.lowercase(Locale.US).contains(r) } }
-            return devanagariLine ?: candidates.first()
+            val cleanCandidates = candidates.filter { cand ->
+                containsDevanagari(cand) &&
+                    !REFUSAL_PATTERNS.any { cand.lowercase(Locale.US).contains(it) } &&
+                    !PROMPT_LEAK_PATTERNS.any { cand.lowercase(Locale.US).contains(it) }
+            }
+            val nonLooping = cleanCandidates.firstOrNull { !hasRepetitiveLoopOrGarbage(it) }
+            return nonLooping ?: cleanCandidates.firstOrNull() ?: candidates.first()
         }
     }
 }

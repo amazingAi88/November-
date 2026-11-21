@@ -63,6 +63,8 @@ class OnDeviceDubbingEngine(private val context: Context) {
         if (!OnDeviceModelManager.isVoskModelReady(context)) {
             OnDeviceModelManager.downloadAndExtractVoskModel(context, onStatus)
         }
+        // Best-effort prepare ML Kit EN->HI (~30MB) so Hybrid Turbo & fallback are always ready when online
+        runCatching { OnDeviceModelManager.ensureMlKitHindiModel(onStatus) }
         val (ttsReady, _, ttsNote) = OnDeviceModelManager.checkAndroidHindiTts(context)
         if (!ttsReady) {
             throw IllegalStateException(
@@ -75,6 +77,105 @@ class OnDeviceDubbingEngine(private val context: Context) {
             ?: throw IllegalStateException(
                 "No Local GGUF LLM model installed yet. Open Studio Settings → Local Open-Source GGUF LLM to download Qwen 2.5 or import a .gguf file."
             )
+    }
+
+    /**
+     * Pre-warms Android TextToSpeech IPC connection & Hindi voice list so voice previews
+     * start playing instantaneously (<300ms) when the user taps Preview.
+     */
+    suspend fun warmUpTts() = withContext(Dispatchers.IO) {
+        runCatching { getOrInitTts() }
+    }
+
+    /**
+     * Plays a Hindi voice audition directly through Android's streaming TextToSpeech audio path
+     * (zero temp WAV synthesis or resampling wait — typically audible in ~100–250ms).
+     */
+    suspend fun speakPreviewInstant(
+        hindiText: String,
+        voicePresetName: String,
+        emotion: String,
+        speedMultiplier: Float,
+        onStarted: (estimatedDurationMs: Long) -> Unit,
+        onCompleted: () -> Unit
+    ) {
+        require(hindiText.isNotBlank()) { "Hindi text cannot be blank for TTS preview." }
+        val tts = ttsMutex.withLock {
+            val engine = getOrInitTts()
+            val preset = HindiVoicePresets.all.find { it.id == voicePresetName }
+                ?: HindiVoicePresets.all.first()
+            applyPresetToTts(engine, preset, emotion, speedMultiplier)
+            engine
+        }
+
+        val wordCount = hindiText.trim().split(Regex("\\s+")).count { it.isNotBlank() }.coerceAtLeast(1)
+        val estimatedMs = ((wordCount * 380L) / speedMultiplier.coerceIn(0.75f, 1.35f)).toLong().coerceIn(900L, 6000L)
+        val utteranceId = "preview_${UUID.randomUUID()}"
+
+        withTimeout(6_000L) {
+            suspendCancellableCoroutine<Unit> { startCont ->
+                tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                    override fun onStart(id: String?) {
+                        if (id == utteranceId) {
+                            onStarted(estimatedMs)
+                            if (startCont.isActive) startCont.resume(Unit)
+                        }
+                    }
+
+                    override fun onDone(id: String?) {
+                        if (id == utteranceId) {
+                            if (startCont.isActive) startCont.resume(Unit)
+                            onCompleted()
+                        }
+                    }
+
+                    @Deprecated("Deprecated in Java")
+                    override fun onError(id: String?) {
+                        if (id == utteranceId) {
+                            if (startCont.isActive) {
+                                startCont.resumeWithException(IllegalStateException("Android TTS preview error."))
+                            }
+                            onCompleted()
+                        }
+                    }
+
+                    override fun onError(id: String?, errorCode: Int) {
+                        if (id == utteranceId) {
+                            if (startCont.isActive) {
+                                startCont.resumeWithException(
+                                    IllegalStateException("Android TTS preview error (code $errorCode).")
+                                )
+                            }
+                            onCompleted()
+                        }
+                    }
+
+                    override fun onStop(id: String?, interrupted: Boolean) {
+                        if (id == utteranceId) {
+                            if (startCont.isActive) startCont.resume(Unit)
+                            onCompleted()
+                        }
+                    }
+                })
+
+                val params = Bundle().apply {
+                    putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, utteranceId)
+                }
+                val res = tts.speak(hindiText, TextToSpeech.QUEUE_FLUSH, params, utteranceId)
+                if (res != TextToSpeech.SUCCESS) {
+                    if (startCont.isActive) {
+                        startCont.resumeWithException(
+                            IllegalStateException("Android TTS failed to start preview (code $res).")
+                        )
+                    }
+                    onCompleted()
+                }
+            }
+        }
+    }
+
+    fun stopPreviewSpeech() {
+        runCatching { ttsEngine?.stop() }
     }
 
     /**
@@ -227,32 +328,7 @@ class OnDeviceDubbingEngine(private val context: Context) {
         val tts = getOrInitTts()
         val preset = HindiVoicePresets.all.find { it.id == voicePresetName }
             ?: HindiVoicePresets.all.first()
-
-        // Pick distinct installed Hindi voice matching preset gender when multiple system voices exist
-        val targetVoice = pickAndroidVoiceForPreset(preset)
-        if (targetVoice != null) {
-            runCatching { tts.voice = targetVoice }
-        } else {
-            runCatching { tts.language = Locale.forLanguageTag("hi-IN") }
-        }
-
-        val basePitch = when (preset.id) {
-            "Charon" -> 0.82f
-            "Fenrir" -> 0.89f
-            "Orus" -> 0.95f
-            "Puck" -> 1.04f
-            "Kore" -> 1.15f
-            "Aoede" -> 1.10f
-            "Leda" -> 1.22f
-            else -> 1.00f
-        }
-        val emotionPitchBias = when (emotion.lowercase()) {
-            "excited", "energetic", "angry" -> 1.05f
-            "sad", "whisper", "calm" -> 0.95f
-            else -> 1.0f
-        }
-        tts.setPitch((basePitch * emotionPitchBias).coerceIn(0.65f, 1.45f))
-        tts.setSpeechRate(speedMultiplier.coerceIn(0.75f, 1.35f))
+        applyPresetToTts(tts, preset, emotion, speedMultiplier)
 
         outWavFile.parentFile?.mkdirs()
         val rawTtsWav = File(tempCacheDir, "android_tts_${UUID.randomUUID()}.wav")
@@ -277,6 +353,38 @@ class OnDeviceDubbingEngine(private val context: Context) {
         } finally {
             rawTtsWav.delete()
         }
+    }
+
+    private fun applyPresetToTts(
+        tts: TextToSpeech,
+        preset: VoicePreset,
+        emotion: String,
+        speedMultiplier: Float
+    ) {
+        val targetVoice = pickAndroidVoiceForPreset(preset)
+        if (targetVoice != null) {
+            runCatching { tts.voice = targetVoice }
+        } else {
+            runCatching { tts.language = Locale.forLanguageTag("hi-IN") }
+        }
+
+        val basePitch = when (preset.id) {
+            "Charon" -> 0.82f
+            "Fenrir" -> 0.89f
+            "Orus" -> 0.95f
+            "Puck" -> 1.04f
+            "Kore" -> 1.15f
+            "Aoede" -> 1.10f
+            "Leda" -> 1.22f
+            else -> 1.00f
+        }
+        val emotionPitchBias = when (emotion.lowercase()) {
+            "excited", "energetic", "angry" -> 1.05f
+            "sad", "whisper", "calm" -> 0.95f
+            else -> 1.0f
+        }
+        tts.setPitch((basePitch * emotionPitchBias).coerceIn(0.65f, 1.45f))
+        tts.setSpeechRate(speedMultiplier.coerceIn(0.75f, 1.35f))
     }
 
     fun release() {

@@ -18,6 +18,7 @@ import com.example.ai.GeminiDubbingService
 import com.example.ai.HindiVoicePresets
 import com.example.ai.OnDeviceDubbingEngine
 import com.example.ai.SlangDictionaryManager
+import com.example.ai.VocalSfxClassifier
 import com.example.data.local.ChunkEntity
 import com.example.data.local.ChunkStatus
 import com.example.data.local.DialogueSegmentEntity
@@ -319,17 +320,19 @@ class DubbingWorker(
 
                     repository.deleteSegmentsForChunk(projectId, chunk.chunkIndex)
                     val entities = sttResult.segments.mapIndexed { orderIdx, seg ->
+                        val isVocalMusic = seg.audioType == "SPEECH" &&
+                            VocalSfxClassifier.isNonLexicalVocalSound(seg.englishText)
                         DialogueSegmentEntity(
                             projectId = projectId,
                             chunkIndex = chunk.chunkIndex,
                             orderIndex = orderIdx,
                             startMs = chunk.startMs + seg.startOffsetMs,
                             endMs = chunk.startMs + seg.endOffsetMs,
-                            speakerLabel = seg.speakerLabel,
+                            speakerLabel = if (isVocalMusic) "AMBIENT" else seg.speakerLabel,
                             englishText = seg.englishText,
-                            emotion = seg.emotion,
+                            emotion = if (isVocalMusic) "neutral" else seg.emotion,
                             isOverlapping = seg.isOverlapping,
-                            audioType = seg.audioType,
+                            audioType = if (isVocalMusic) "VOCAL_SFX" else seg.audioType,
                             speechSpeed = project.defaultSpeechSpeed,
                             status = SegmentStatus.TRANSCRIBED
                         )
@@ -352,6 +355,22 @@ class DubbingWorker(
                 if (shouldStopOrPause(projectId)) return markPausedAndReturn(projectId)
                 val p2Start = System.currentTimeMillis()
                 var currentChunk = waveStates[chunk.chunkIndex] ?: chunk
+                val rawChunkSegments = repository.getSegmentsForChunk(projectId, chunk.chunkIndex)
+                for (seg in rawChunkSegments) {
+                    if (seg.audioType == "SPEECH" && VocalSfxClassifier.isNonLexicalVocalSound(seg.englishText)) {
+                        repository.updateSegment(
+                            seg.copy(
+                                audioType = "VOCAL_SFX",
+                                speakerLabel = "AMBIENT",
+                                hindiText = "",
+                                ttsAudioPath = null,
+                                ttsDurationMs = 0L,
+                                status = SegmentStatus.TRANSCRIBED,
+                                errorMessage = null
+                            )
+                        )
+                    }
+                }
                 val chunkSegments = repository.getSegmentsForChunk(projectId, chunk.chunkIndex)
                 val untranslated = chunkSegments.filter {
                     it.audioType == "SPEECH" && it.englishText.isNotBlank() && it.hindiText.isBlank()

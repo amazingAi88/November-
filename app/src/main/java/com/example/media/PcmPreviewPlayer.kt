@@ -6,6 +6,7 @@ import android.media.AudioTrack
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -26,6 +27,7 @@ class PcmPreviewPlayer(private val scope: CoroutineScope) {
     val state: StateFlow<AudioPlaybackState> = _state.asStateFlow()
 
     private var playJob: Job? = null
+    private var externalStopCallback: (() -> Unit)? = null
 
     fun playWav(file: File, tag: String) {
         if (_state.value.activeTag == tag && _state.value.isPlaying) {
@@ -104,9 +106,46 @@ class PcmPreviewPlayer(private val scope: CoroutineScope) {
         }
     }
 
+    fun startExternalPlayback(
+        tag: String,
+        estimatedDurationMs: Long,
+        onStop: () -> Unit
+    ) {
+        stop()
+        externalStopCallback = onStop
+        val dur = estimatedDurationMs.coerceAtLeast(800L)
+        _state.value = AudioPlaybackState(activeTag = tag, isPlaying = true, positionMs = 0L, durationMs = dur)
+        playJob = scope.launch(Dispatchers.Default) {
+            val startedAt = System.currentTimeMillis()
+            while (isActive && _state.value.activeTag == tag && _state.value.isPlaying) {
+                val elapsed = (System.currentTimeMillis() - startedAt).coerceAtMost(dur)
+                _state.value = AudioPlaybackState(
+                    activeTag = tag,
+                    isPlaying = true,
+                    positionMs = elapsed,
+                    durationMs = dur
+                )
+                delay(100L)
+            }
+        }
+    }
+
+    fun finishExternalPlayback(tag: String) {
+        if (_state.value.activeTag == tag) {
+            playJob?.cancel()
+            playJob = null
+            externalStopCallback = null
+            _state.value = AudioPlaybackState()
+        }
+    }
+
     fun stop() {
         playJob?.cancel()
         playJob = null
+        externalStopCallback?.let { cb ->
+            externalStopCallback = null
+            runCatching { cb() }
+        }
         _state.value = AudioPlaybackState()
     }
 }

@@ -75,28 +75,45 @@ object OnDeviceSpeakerAnalyzer {
                 )
             }
 
-            val pitchHz = estimateMedianPitchHz(pcmMono, sampleRate, sMs, eMs)
-            val (speakerId, gender, traits) = classifySpeakerFromPitch(pitchHz)
+            val cleanText = phrase.text.trim()
+            val isVocalSfx = VocalSfxClassifier.isNonLexicalVocalSound(cleanText)
 
-            if (!discoveredSpeakers.containsKey(speakerId)) {
-                discoveredSpeakers[speakerId] = TranscribedSpeaker(
-                    speakerLabel = speakerId,
-                    inferredGender = gender,
-                    traits = traits
+            if (isVocalSfx) {
+                timeline.add(
+                    TranscribedSegment(
+                        startOffsetMs = sMs,
+                        endOffsetMs = eMs,
+                        speakerLabel = "AMBIENT",
+                        englishText = cleanText,
+                        emotion = "neutral",
+                        isOverlapping = false,
+                        audioType = "VOCAL_SFX"
+                    )
+                )
+            } else {
+                val pitchHz = estimateMedianPitchHz(pcmMono, sampleRate, sMs, eMs)
+                val (speakerId, gender, traits) = classifySpeakerFromPitch(pitchHz)
+
+                if (!discoveredSpeakers.containsKey(speakerId)) {
+                    discoveredSpeakers[speakerId] = TranscribedSpeaker(
+                        speakerLabel = speakerId,
+                        inferredGender = gender,
+                        traits = traits
+                    )
+                }
+
+                timeline.add(
+                    TranscribedSegment(
+                        startOffsetMs = sMs,
+                        endOffsetMs = eMs,
+                        speakerLabel = speakerId,
+                        englishText = cleanText,
+                        emotion = estimateEmotionFromEnergy(pcmMono, sampleRate, sMs, eMs),
+                        isOverlapping = false,
+                        audioType = "SPEECH"
+                    )
                 )
             }
-
-            timeline.add(
-                TranscribedSegment(
-                    startOffsetMs = sMs,
-                    endOffsetMs = eMs,
-                    speakerLabel = speakerId,
-                    englishText = phrase.text.trim(),
-                    emotion = estimateEmotionFromEnergy(pcmMono, sampleRate, sMs, eMs),
-                    isOverlapping = false,
-                    audioType = "SPEECH"
-                )
-            )
             cursorMs = maxOf(cursorMs, eMs)
         }
 

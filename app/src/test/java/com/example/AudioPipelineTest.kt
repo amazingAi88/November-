@@ -256,8 +256,8 @@ class AudioPipelineTest {
     }
 
     @Test
-    fun `Hybrid Turbo routing skips LLM on routine sentences and triggers on slang, dict matches, long lines, or raw intimate cues`() {
-        // Routine short lines stay on fast ML Kit
+    fun `Hybrid Turbo routing skips LLM on routine sentences and triggers on slang, dict matches, or raw intimate cues`() {
+        // Routine short and long clean lines stay on fast ML Kit
         assertFalse(
             LocalGgufTranslator.requiresLocalLlmContext(
                 englishText = "Where did you park the car?",
@@ -270,6 +270,11 @@ class AudioPipelineTest {
                 dialogueStyle = DialogueStyle.CONVERSATIONAL
             )
         )
+        assertFalse(
+            LocalGgufTranslator.requiresLocalLlmContext(
+                englishText = "Please open the red door on the second floor before anyone arrives here today"
+            )
+        )
         // Profanity/slang routes to GGUF (and 'hello' must NOT false-trigger 'hell')
         assertFalse(LocalGgufTranslator.requiresLocalLlmContext("Hello my friend"))
         assertTrue(LocalGgufTranslator.requiresLocalLlmContext("What the fuck is going on?"))
@@ -280,12 +285,6 @@ class AudioPipelineTest {
                 hasDictMatch = true
             )
         )
-        // >12 words routes to GGUF for long scene coherence
-        assertTrue(
-            LocalGgufTranslator.requiresLocalLlmContext(
-                englishText = "Please open the red door on the second floor before anyone arrives here today"
-            )
-        )
         // RAW_UNCENSORED uses neighbor context for intimate scenes
         assertTrue(
             LocalGgufTranslator.requiresLocalLlmContext(
@@ -294,6 +293,84 @@ class AudioPipelineTest {
                 dialogueStyle = DialogueStyle.RAW_UNCENSORED
             )
         )
+    }
+
+    @Test
+    fun `LocalGgufTranslator prompt has no hardcoded Hindi example lines and detects word loops`() {
+        val translator = LocalGgufTranslator()
+        val rawPrompt = translator.buildSingleLinePrompt(
+            englishLine = "You are going to love this.",
+            prevEnglish = null,
+            speakerGender = "FEMALE",
+            emotion = "calm",
+            glossaryHints = "",
+            dialogueStyle = DialogueStyle.RAW_UNCENSORED
+        )
+        val stdPrompt = translator.buildSingleLinePrompt(
+            englishLine = "Oh really?",
+            prevEnglish = null,
+            speakerGender = null,
+            emotion = null,
+            glossaryHints = "",
+            dialogueStyle = DialogueStyle.CONVERSATIONAL
+        )
+        assertFalse(rawPrompt.contains("दफ़ा हो जा यहाँ से"))
+        assertFalse(stdPrompt.contains("मेरे लिए रुको"))
+
+        // Repetition & dash-loop artifacts detected
+        assertTrue(LocalGgufTranslator.hasRepetitiveLoopOrGarbage("हो यहाँ से! - - हो यहाँ से!"))
+        assertTrue(LocalGgufTranslator.hasRepetitiveLoopOrGarbage("जा यहाँ जा यहाँ जा यहाँ"))
+        assertTrue(LocalGgufTranslator.hasRepetitiveLoopOrGarbage("दफ़ा हो", "You know I'm just so warming three mean more stone stuck to the news"))
+        assertFalse(LocalGgufTranslator.hasRepetitiveLoopOrGarbage("मैं पूरी तरह से गंभीर हूँ।", "i'm totally serious"))
+    }
+
+    @Test
+    fun `VocalSfxClassifier flags vocal music and mouth sounds while keeping real dialogue as SPEECH`() {
+        val vocalSounds = listOf(
+            "ah ha", "ha", "ya", "amh", "oh my god", "ph ph",
+            "ah", "oh yeah", "umhh", "uhh", "umm", "oh my gosh",
+            "oh", "ooh", "aah", "mhm", "hmm", "uh-huh", "of"
+        )
+        vocalSounds.forEach { sound ->
+            assertTrue("Expected '$sound' to be classified as VOCAL_SFX", com.example.ai.VocalSfxClassifier.isNonLexicalVocalSound(sound))
+        }
+
+        val realDialogue = listOf(
+            "I'm totally serious",
+            "Where did you go?",
+            "Oh really",
+            "You",
+            "Yeah!",
+            "God bless you",
+            "Oh my god look at the car outside"
+        )
+        realDialogue.forEach { line ->
+            assertFalse("Expected '$line' to stay SPEECH", com.example.ai.VocalSfxClassifier.isNonLexicalVocalSound(line))
+        }
+    }
+
+    @Test
+    fun `OnDeviceSpeakerAnalyzer marks vocal SFX phrases as VOCAL_SFX so original audio stays intact`() {
+        val sampleRate = 16000
+        val pcm = ShortArray(sampleRate * 3) { 2000 }
+        val sttWav = tempFolder.newFile("vocal_sfx_test.wav")
+        WavUtils.writePcmBytesAsWav(WavUtils.shortArrayToBytes(pcm), sampleRate, 1, sttWav)
+
+        val result = OnDeviceSpeakerAnalyzer.analyzeSpeakersAndBuildTimeline(
+            sttWavFile = sttWav,
+            phrases = listOf(
+                OnDeviceSpeakerAnalyzer.SpeechRawPhrase(100L, 800L, "ah ha"),
+                OnDeviceSpeakerAnalyzer.SpeechRawPhrase(900L, 1800L, "oh yeah"),
+                OnDeviceSpeakerAnalyzer.SpeechRawPhrase(1900L, 2800L, "Wait for me outside")
+            ),
+            chunkDurationMs = 3000L
+        )
+
+        val vocalSfx = result.segments.filter { it.audioType == "VOCAL_SFX" }
+        val speech = result.segments.filter { it.audioType == "SPEECH" }
+        assertEquals(2, vocalSfx.size)
+        assertEquals(1, speech.size)
+        assertEquals("Wait for me outside", speech.first().englishText)
     }
 
     @Test

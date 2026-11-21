@@ -44,6 +44,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 
 private const val TAG = "ProjectStudioViewModel"
@@ -125,6 +126,9 @@ class ProjectStudioViewModel(
     init {
         refreshTempSize()
         refreshActiveGgufModel()
+        viewModelScope.launch(Dispatchers.IO) {
+            onDeviceEngine.warmUpTts()
+        }
     }
 
     fun clearBanner() {
@@ -219,14 +223,13 @@ class ProjectStudioViewModel(
     ) {
         val tag = "${tagPrefix}_$presetId"
         if (playbackState.value.activeTag == tag && playbackState.value.isPlaying) {
-            previewPlayer.stop()
-            _voicePreviewState.value = VoicePreviewState.Idle
+            stopVoicePreview()
             return
         }
         viewModelScope.launch {
             val proj = repository.getProject(projectId) ?: return@launch
             val preset = HindiVoicePresets.all.find { it.id == presetId } ?: return@launch
-            previewPlayer.stop()
+            stopVoicePreview()
             _voicePreviewState.value = VoicePreviewState.Loading(presetId)
             try {
                 val speed = (speedOverride ?: proj.defaultSpeechSpeed).coerceIn(0.75f, 1.35f)
@@ -240,31 +243,56 @@ class ProjectStudioViewModel(
                     cacheDir,
                     "vp_${proj.engineMode}_${preset.id}_${speedKey}_${emotion}_$textHash.wav"
                 )
-                if (!previewWav.exists() || previewWav.length() <= 44L) {
-                    if (proj.engineMode == EngineMode.ON_DEVICE_FREE || proj.engineMode == EngineMode.ON_DEVICE_LLM) {
-                        onDeviceEngine.generateHindiTts(
-                            hindiText = line,
-                            voicePresetName = preset.id,
-                            emotion = emotion,
-                            speedMultiplier = speed,
-                            targetSlotDurationMs = 8_000L,
-                            outWavFile = previewWav,
-                            tempCacheDir = cacheDir
-                        )
-                    } else {
-                        aiService.generateHindiTts(
-                            hindiText = line,
-                            voicePresetName = preset.id,
-                            emotion = emotion,
-                            speedMultiplier = speed,
-                            targetSlotDurationMs = 8_000L,
-                            outWavFile = previewWav,
-                            tempCacheDir = cacheDir
-                        )
+
+                // Fast path 1: Cached WAV plays in <10ms
+                if (previewWav.exists() && previewWav.length() > 44L) {
+                    _voicePreviewState.value = VoicePreviewState.Idle
+                    previewPlayer.playWav(previewWav, tag)
+                    return@launch
+                }
+
+                // Fast path 2: Cloud mode gets a strict 950ms budget before instant local voice playback
+                if (proj.engineMode == EngineMode.GEMINI_CLOUD) {
+                    val cloudOk = withTimeoutOrNull(950L) {
+                        runCatching {
+                            aiService.generateHindiTts(
+                                hindiText = line,
+                                voicePresetName = preset.id,
+                                emotion = emotion,
+                                speedMultiplier = speed,
+                                targetSlotDurationMs = 5_000L,
+                                outWavFile = previewWav,
+                                tempCacheDir = cacheDir
+                            )
+                            true
+                        }.getOrDefault(false)
+                    } == true
+                    if (cloudOk && previewWav.exists() && previewWav.length() > 44L) {
+                        _voicePreviewState.value = VoicePreviewState.Idle
+                        previewPlayer.playWav(previewWav, tag)
+                        return@launch
                     }
                 }
-                _voicePreviewState.value = VoicePreviewState.Idle
-                previewPlayer.playWav(previewWav, tag)
+
+                // Fast path 3: Direct streaming Android TTS (audible in ~100-250ms, <= 1s guarantee)
+                onDeviceEngine.speakPreviewInstant(
+                    hindiText = line,
+                    voicePresetName = preset.id,
+                    emotion = emotion,
+                    speedMultiplier = speed,
+                    onStarted = { estDurationMs ->
+                        _voicePreviewState.value = VoicePreviewState.Idle
+                        previewPlayer.startExternalPlayback(
+                            tag = tag,
+                            estimatedDurationMs = estDurationMs,
+                            onStop = { onDeviceEngine.stopPreviewSpeech() }
+                        )
+                    },
+                    onCompleted = {
+                        _voicePreviewState.value = VoicePreviewState.Idle
+                        previewPlayer.finishExternalPlayback(tag)
+                    }
+                )
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -279,18 +307,19 @@ class ProjectStudioViewModel(
 
     fun stopVoicePreview() {
         previewPlayer.stop()
+        onDeviceEngine.stopPreviewSpeech()
         _voicePreviewState.value = VoicePreviewState.Idle
     }
 
     private fun defaultSampleLineForPreset(presetId: String): String = when (presetId) {
-        "Charon" -> "वक़्त बहुत कम है, हमें सूरज ढलने से पहले यहाँ से निकलना होगा।"
-        "Fenrir" -> "जो भी रास्ते में आएगा, आज हम किसी को नहीं छोड़ेंगे!"
-        "Orus" -> "चिंता मत करो दोस्त, हम इस मुश्किल का हल ज़रूर निकाल लेंगे।"
-        "Puck" -> "अरे वाह! तुमने तो कमाल कर दिया, चलो जश्न मनाते हैं!"
-        "Kore" -> "सच चाहे कितना भी कड़वा हो, मुझे आज सब कुछ जानना है।"
-        "Aoede" -> "यह सफ़र आसान नहीं होगा, लेकिन जब तक हम साथ हैं सब ठीक रहेगा।"
-        "Leda" -> "उस शाम की ख़ामोशी में भी एक अनकही कहानी छिपी थी।"
-        else -> "नमस्ते, यह इस मूवी प्रोजेक्ट के लिए हिंदी डबिंग आवाज़ का नमूना है।"
+        "Charon" -> "वक़्त कम है, जल्दी निकलो!"
+        "Fenrir" -> "रास्ते से हटो, वरना बुरा होगा!"
+        "Orus" -> "चिंता मत करो, सब ठीक होगा।"
+        "Puck" -> "अरे वाह! कमाल कर दिया!"
+        "Kore" -> "मुझे आज हर सच जानना है।"
+        "Aoede" -> "जब तक हम साथ हैं, डरना मत।"
+        "Leda" -> "इस ख़ामोशी में एक राज़ है।"
+        else -> "नमस्ते, यह हिंदी डबिंग आवाज़ है।"
     }
 
     fun updateSpeaker(
