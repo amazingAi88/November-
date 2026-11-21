@@ -121,11 +121,15 @@ object AudioSeparator {
         var intervalCursor = 0
 
         val sampleRate = header.sampleRate.toDouble()
-        // Two cascaded speech-presence filters covering formants (450Hz..3200Hz)
-        val midSpeechLow = BiquadFilter.bandPass(sampleRate, centerHz = 650.0, q = 0.85)
-        val midSpeechHigh = BiquadFilter.bandPass(sampleRate, centerHz = 2100.0, q = 0.90)
-        val monoNotchLow = BiquadFilter.bandPass(sampleRate, centerHz = 650.0, q = 0.85)
-        val monoNotchHigh = BiquadFilter.bandPass(sampleRate, centerHz = 2100.0, q = 0.90)
+        // 3-band vocal presence bank (350 Hz fundamental + 1050 Hz nasal/vowel + 2400 Hz consonant brilliance)
+        // to attenuate centered English speech cleanly while preserving sub-bass (<220 Hz) and wide stereo BGM.
+        val midVocalLow = BiquadFilter.bandPass(sampleRate, centerHz = 350.0, q = 0.90)
+        val midVocalMid = BiquadFilter.bandPass(sampleRate, centerHz = 1050.0, q = 0.85)
+        val midVocalHigh = BiquadFilter.bandPass(sampleRate, centerHz = 2400.0, q = 0.90)
+
+        val monoVocalLow = BiquadFilter.bandPass(sampleRate, centerHz = 350.0, q = 0.90)
+        val monoVocalMid = BiquadFilter.bandPass(sampleRate, centerHz = 1050.0, q = 0.85)
+        val monoVocalHigh = BiquadFilter.bandPass(sampleRate, centerHz = 2400.0, q = 0.90)
 
         val isStereoSource = sourceChannels >= 2 && header.channels >= 2
         val rampFrames = (sampleRate * 0.035).toInt().coerceAtLeast(1) // 35ms smooth fade
@@ -182,31 +186,42 @@ object AudioSeparator {
                                 val mid = 0.5 * (l + r)
                                 val side = 0.5 * (l - r)
 
-                                // Extract speech formants from center channel
-                                val vocalMid = (midSpeechLow.process(mid) + midSpeechHigh.process(mid)) * 0.65
-                                // Attenuate center vocal band during speech while retaining Side & non-speech Mid
-                                val attenuatedMid = mid - vocalMid * (0.90 * speechMixFactor)
-                                // Also gently trim overall center level during active speech to reduce reverb bleed
-                                val centerScale = 1.0 - (0.35 * speechMixFactor)
+                                // Extract 3-band speech formants from center channel
+                                val vocalMid = (
+                                    midVocalLow.process(mid) * 0.45 +
+                                        midVocalMid.process(mid) * 0.72 +
+                                        midVocalHigh.process(mid) * 0.55
+                                    )
+                                // Deeply suppress centered vocal formants while keeping Side stereo instruments/ambience intact
+                                val attenuatedMid = mid - vocalMid * (0.96 * speechMixFactor)
+                                val centerScale = 1.0 - (0.20 * speechMixFactor)
                                 val cleanMid = attenuatedMid * centerScale
-                                val boostedSide = side * (1.0 + 0.15 * speechMixFactor)
+                                val boostedSide = side * (1.0 + 0.22 * speechMixFactor)
 
                                 samples[idx] = (cleanMid + boostedSide).roundToInt().coerceIn(-32768, 32767).toShort()
                                 samples[idx + 1] = (cleanMid - boostedSide).roundToInt().coerceIn(-32768, 32767).toShort()
                             } else {
-                                // Dual-mono input: speech-band attenuation + ducking during active speech
-                                val speechBand = (monoNotchLow.process(l) + monoNotchHigh.process(l)) * 0.60
-                                val ducked = (l - speechBand * (0.78 * speechMixFactor)) *
-                                    (1.0 - 0.30 * speechMixFactor)
+                                // Dual-mono input: 3-band speech attenuation during active speech
+                                val speechBand = (
+                                    monoVocalLow.process(l) * 0.45 +
+                                        monoVocalMid.process(l) * 0.72 +
+                                        monoVocalHigh.process(l) * 0.55
+                                    )
+                                val ducked = (l - speechBand * (0.85 * speechMixFactor)) *
+                                    (1.0 - 0.25 * speechMixFactor)
                                 val outS = ducked.roundToInt().coerceIn(-32768, 32767).toShort()
                                 samples[idx] = outS
                                 samples[idx + 1] = outS
                             }
                         } else {
                             val m = samples[f].toDouble()
-                            val speechBand = (monoNotchLow.process(m) + monoNotchHigh.process(m)) * 0.60
-                            val ducked = (m - speechBand * (0.78 * speechMixFactor)) *
-                                (1.0 - 0.30 * speechMixFactor)
+                            val speechBand = (
+                                monoVocalLow.process(m) * 0.45 +
+                                    monoVocalMid.process(m) * 0.72 +
+                                    monoVocalHigh.process(m) * 0.55
+                                )
+                            val ducked = (m - speechBand * (0.85 * speechMixFactor)) *
+                                (1.0 - 0.25 * speechMixFactor)
                             samples[f] = ducked.roundToInt().coerceIn(-32768, 32767).toShort()
                         }
                     }

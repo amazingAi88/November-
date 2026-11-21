@@ -79,6 +79,12 @@ data class TranslatedLine(
     val emotion: String
 )
 
+data class GeminiCloudSampleResult(
+    val hindiText: String,
+    val emotion: String,
+    val latencyMs: Long
+)
+
 class GeminiApiException(
     message: String,
     val isRateLimitOrQuota: Boolean = false,
@@ -300,6 +306,94 @@ class GeminiDubbingService {
         }
     }
 
+    suspend fun testGeminiCloudSample(
+        englishLine: String,
+        dialogueStyle: String,
+        dictionaryConfig: SlangDictionaryConfig? = null
+    ): GeminiCloudSampleResult = withContext(Dispatchers.IO) {
+        val cleanLine = englishLine.trim()
+        require(cleanLine.isNotBlank()) { "Sample English dialogue cannot be blank." }
+        val startNs = System.nanoTime()
+        val dummySegment = DialogueSegmentEntity(
+            id = 1L,
+            projectId = 0L,
+            chunkIndex = 0,
+            orderIndex = 0,
+            startMs = 0L,
+            endMs = 3500L,
+            speakerLabel = "SPEAKER_1",
+            englishText = cleanLine,
+            emotion = "serious"
+        )
+        val dummySpeaker = SpeakerEntity(
+            projectId = 0L,
+            speakerLabel = "SPEAKER_1",
+            displayName = "Speaker 1",
+            gender = "MALE",
+            voicePresetName = "Charon",
+            traits = "Lead cinema character"
+        )
+        val matches = if (dictionaryConfig != null) {
+            SlangDictionaryManager.resolveMatches(
+                config = dictionaryConfig,
+                englishText = cleanLine,
+                prevContext = "",
+                nextContext = "",
+                emotion = "serious",
+                dialogueStyle = dialogueStyle
+            )
+        } else emptyList()
+        val glossarySection = SlangDictionaryManager.buildPromptGlossaryHints(matches)
+        val inputJson = JSONArray().put(
+            JSONObject().apply {
+                put("segmentId", dummySegment.id)
+                put("speaker", dummySpeaker.speakerLabel)
+                put("gender", dummySpeaker.gender)
+                put("sceneMood", "dramatic")
+                put("emotion", dummySegment.emotion)
+                put("targetDurationMs", 3500L)
+                put("englishText", cleanLine)
+            }
+        )
+        val prompt = """
+            You are an expert Bollywood/cinema Hindi dialogue writer.
+            Translate the English dialogue segment below into natural spoken Hindi (Devanagari script).
+            Style requested: $dialogueStyle.
+            ${if (glossarySection.isNotBlank()) "\n$glossarySection\n" else ""}
+            Segments JSON:
+            $inputJson
+        """.trimIndent()
+
+        try {
+            val response = withTimeout(30_000L) {
+                translationModel.generateContent(prompt)
+            }
+            val jsonStr = response.text ?: throw GeminiApiException("Gemini returned an empty response.")
+            val parsed = parseTranslationJson(jsonStr).firstOrNull { it.hindiText.isNotBlank() }
+                ?: throw GeminiApiException("Gemini returned no translated Hindi line.")
+            val finalHindi = SlangDictionaryManager.postProcessLlmOutput(
+                llmHindi = parsed.hindiText,
+                englishText = cleanLine,
+                matches = matches
+            )
+            val latencyMs = ((System.nanoTime() - startNs) / 1_000_000L).coerceAtLeast(1L)
+            GeminiCloudSampleResult(
+                hindiText = finalHindi,
+                emotion = parsed.emotion,
+                latencyMs = latencyMs
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: TimeoutCancellationException) {
+            Log.e(TAG, "Gemini sample test timed out", e)
+            throw GeminiApiException("Gemini Cloud request timed out after 30s. Check internet connection.", cause = e)
+        } catch (e: GeminiApiException) {
+            throw e
+        } catch (e: Exception) {
+            throw mapException("Gemini Cloud connection test failed", e)
+        }
+    }
+
     /**
      * Generates Hindi spoken audio for a single dialogue segment using Gemini TTS
      * (`gemini-3.1-flash-tts-preview`) and writes a normalized 44.1kHz Stereo WAV to [outWavFile].
@@ -411,22 +505,50 @@ class GeminiDubbingService {
                     tempRawWav.delete()
                 }
             } else {
-                // MP3 / AAC / OGG container: decode via MediaCodec
+                // MP3 / AAC / OGG container: decode to raw WAV first, then apply uniform slot-fit time-scaling
                 val ext = when {
                     mime.contains("mp3") || mime.contains("mpeg") -> "mp3"
                     mime.contains("ogg") -> "ogg"
                     else -> "m4a"
                 }
                 val tempEncoded = File(tempCacheDir, "tts_enc_${System.nanoTime()}.$ext")
+                val tempDecoded = File(tempCacheDir, "tts_dec_${System.nanoTime()}.wav")
                 try {
                     tempEncoded.writeBytes(bytes)
                     AudioChunkExtractor.decodeEncodedAudioToMixWav(
                         encodedFile = tempEncoded,
-                        outWavFile = outWavFile,
-                        timeScale = speedMultiplier
+                        outWavFile = tempDecoded,
+                        timeScale = 1.0f
+                    )
+                    val hdr = WavUtils.readHeader(tempDecoded)
+                    val pcmBytes = tempDecoded.inputStream().use { ins ->
+                        ins.skip(hdr.dataOffset)
+                        ins.readBytes()
+                    }
+                    val rawShorts = WavUtils.bytesToShortArray(pcmBytes)
+                    val effectiveSpeed = computeEffectiveSpeed(
+                        rawFrameCount = rawShorts.size / hdr.channels.coerceAtLeast(1),
+                        sampleRate = hdr.sampleRate,
+                        requestedSpeed = speedMultiplier,
+                        targetSlotMs = targetSlotDurationMs
+                    )
+                    val normalized = WavUtils.convertAndTimeScalePcm(
+                        input = rawShorts,
+                        srcRate = hdr.sampleRate,
+                        srcChannels = hdr.channels,
+                        dstRate = AudioChunkExtractor.MIX_SAMPLE_RATE,
+                        dstChannels = AudioChunkExtractor.MIX_CHANNELS,
+                        timeScale = effectiveSpeed
+                    )
+                    WavUtils.writePcmBytesAsWav(
+                        pcmBytes = WavUtils.shortArrayToBytes(normalized),
+                        sampleRate = AudioChunkExtractor.MIX_SAMPLE_RATE,
+                        channels = AudioChunkExtractor.MIX_CHANNELS,
+                        outFile = outWavFile
                     )
                 } finally {
                     tempEncoded.delete()
+                    tempDecoded.delete()
                 }
             }
 
@@ -443,7 +565,7 @@ class GeminiDubbingService {
         }
     }
 
-    private fun computeEffectiveSpeed(
+    internal fun computeEffectiveSpeed(
         rawFrameCount: Int,
         sampleRate: Int,
         requestedSpeed: Float,
@@ -452,16 +574,16 @@ class GeminiDubbingService {
         if (rawFrameCount <= 0 || sampleRate <= 0 || targetSlotMs <= 0L) return requestedSpeed
         val baseDurationMs = (rawFrameCount * 1000.0) / sampleRate
         val requestedDurationMs = baseDurationMs / requestedSpeed.coerceIn(0.7f, 1.4f)
-        // Gently speed up (capped at 1.32x) only if generated Hindi speech overflows the slot by >15%
-        return if (requestedDurationMs > targetSlotMs * 1.15) {
-            val fitScale = (baseDurationMs / (targetSlotMs * 1.05)).toFloat()
-            fitScale.coerceIn(requestedSpeed, 1.32f)
+        // Speed up (up to 1.45x) when generated Hindi dialogue overflows the slot by >4% to prevent overlapping lines
+        return if (requestedDurationMs > targetSlotMs * 1.04) {
+            val fitScale = (baseDurationMs / (targetSlotMs * 1.01)).toFloat()
+            fitScale.coerceIn(requestedSpeed, 1.45f)
         } else {
             requestedSpeed
         }
     }
 
-    private fun parseTranscriptionJson(
+    internal fun parseTranscriptionJson(
         jsonString: String,
         chunkDurationMs: Long
     ): ChunkTranscriptionResult {
@@ -491,7 +613,7 @@ class GeminiDubbingService {
         return ChunkTranscriptionResult(speakers, segments)
     }
 
-    private fun parseTranslationJson(jsonString: String): List<TranslatedLine> {
+    internal fun parseTranslationJson(jsonString: String): List<TranslatedLine> {
         val root = JSONObject(jsonString)
         val arr = root.optJSONArray("translations") ?: JSONArray()
         return (0 until arr.length()).mapNotNull { idx ->
@@ -509,7 +631,7 @@ class GeminiDubbingService {
         return match?.groupValues?.getOrNull(1)?.toIntOrNull() ?: fallback
     }
 
-    private fun mapException(prefix: String, e: Exception): GeminiApiException {
+    internal fun mapException(prefix: String, e: Exception): GeminiApiException {
         Log.e(TAG, prefix, e)
         val msg = e.localizedMessage ?: e.javaClass.simpleName
         val lower = msg.lowercase()

@@ -2,8 +2,11 @@ package com.example.ui.viewmodel
 
 import android.app.Application
 import android.net.Uri
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.ai.GeminiApiException
+import com.example.ai.GeminiDubbingService
 import com.example.ai.GgufModelPreset
 import com.example.ai.InstalledGgufModel
 import com.example.ai.LocalGgufTranslator
@@ -34,10 +37,26 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
 
+sealed interface GeminiCloudUiState {
+    data object Idle : GeminiCloudUiState
+    data object Loading : GeminiCloudUiState
+    data class Success(
+        val hindiText: String,
+        val emotion: String,
+        val latencyMs: Long
+    ) : GeminiCloudUiState
+    data class Error(
+        val message: String,
+        val isAppCheckError: Boolean = false,
+        val isQuotaError: Boolean = false
+    ) : GeminiCloudUiState
+}
+
 class SettingsViewModel(application: Application) : AndroidViewModel(application) {
     private val preferencesRepository = PreferencesRepository(application)
     private val dubbingRepository = DubbingRepository(application)
     private val localGgufTranslator = LocalGgufTranslator()
+    private val geminiDubbingService = GeminiDubbingService()
 
     val preferences: StateFlow<StudioPreferences> = preferencesRepository.preferencesFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), StudioPreferences())
@@ -79,6 +98,9 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     private val _isTestingSample = MutableStateFlow(false)
     val isTestingSample: StateFlow<Boolean> = _isTestingSample.asStateFlow()
+
+    private val _geminiCloudState = MutableStateFlow<GeminiCloudUiState>(GeminiCloudUiState.Idle)
+    val geminiCloudState: StateFlow<GeminiCloudUiState> = _geminiCloudState.asStateFlow()
 
     private val _slangConfig = MutableStateFlow(SlangDictionaryManager.ensureInitialized(application))
     val slangConfig: StateFlow<SlangDictionaryConfig> = _slangConfig.asStateFlow()
@@ -395,12 +417,55 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                     dictionaryConfig = dictCfg
                 )
                 _sampleTestOutput.value = result
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 _message.value = e.localizedMessage ?: "Sample GGUF translation failed."
             } finally {
                 _isTestingSample.value = false
             }
         }
+    }
+
+    fun testGeminiCloudSample(englishLine: String, dialogueStyle: String) {
+        val cleanInput = englishLine.trim()
+        if (cleanInput.isBlank() || _geminiCloudState.value is GeminiCloudUiState.Loading) return
+        viewModelScope.launch {
+            _geminiCloudState.value = GeminiCloudUiState.Loading
+            try {
+                val dictCfg = withContext(Dispatchers.IO) {
+                    SlangDictionaryManager.loadConfig(getApplication())
+                }
+                val result = geminiDubbingService.testGeminiCloudSample(
+                    englishLine = cleanInput,
+                    dialogueStyle = dialogueStyle,
+                    dictionaryConfig = dictCfg
+                )
+                _geminiCloudState.value = GeminiCloudUiState.Success(
+                    hindiText = result.hindiText,
+                    emotion = result.emotion,
+                    latencyMs = result.latencyMs
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: GeminiApiException) {
+                Log.e("SettingsViewModel", "Gemini Cloud sample test failed", e)
+                _geminiCloudState.value = GeminiCloudUiState.Error(
+                    message = e.message ?: "Gemini Cloud request failed.",
+                    isAppCheckError = e.isAppCheckOrAuth,
+                    isQuotaError = e.isRateLimitOrQuota
+                )
+            } catch (e: Exception) {
+                Log.e("SettingsViewModel", "Gemini Cloud sample test error", e)
+                _geminiCloudState.value = GeminiCloudUiState.Error(
+                    message = e.localizedMessage ?: "Gemini Cloud connection failed."
+                )
+            }
+        }
+    }
+
+    fun clearGeminiCloudTest() {
+        _geminiCloudState.value = GeminiCloudUiState.Idle
     }
 
     fun setActiveGgufModelFileName(name: String) = viewModelScope.launch { preferencesRepository.setActiveGgufModelFileName(name) }

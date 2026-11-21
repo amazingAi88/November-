@@ -7,6 +7,7 @@ import android.media.MediaCodecInfo
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMuxer
+import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -545,29 +546,60 @@ object VideoExporter {
         }
     }
 
-    suspend fun saveToDownloads(context: Context, mp4File: File, displayName: String): Uri? =
+    /**
+     * Saves the dubbed MP4 directly into Android Gallery (`Movies/HindiDubStudio`) via `MediaStore.Video`
+     * on Android 10+ (API 29+), and on Android 9 and earlier writes to public `Movies/HindiDubStudio` +
+     * `MediaScannerConnection` if writable without requesting legacy storage permissions (else returns `null`
+     * so the zero-permission SAF `CreateDocument` picker handles saving).
+     */
+    suspend fun saveToGallery(context: Context, mp4File: File, displayName: String): Uri? =
         withContext(Dispatchers.IO) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 val values = ContentValues().apply {
-                    put(MediaStore.Downloads.DISPLAY_NAME, displayName)
-                    put(MediaStore.Downloads.MIME_TYPE, "video/mp4")
-                    put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/HindiDubStudio")
-                    put(MediaStore.Downloads.IS_PENDING, 1)
+                    put(MediaStore.Video.Media.DISPLAY_NAME, displayName)
+                    put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                    put(MediaStore.Video.Media.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/HindiDubStudio")
+                    put(MediaStore.Video.Media.IS_PENDING, 1)
                 }
                 val resolver = context.contentResolver
-                val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                val uri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
                     ?: return@withContext null
-                resolver.openOutputStream(uri)?.use { out ->
-                    mp4File.inputStream().use { input -> input.copyTo(out) }
+                try {
+                    resolver.openOutputStream(uri)?.use { out ->
+                        mp4File.inputStream().use { input -> input.copyTo(out) }
+                    } ?: return@withContext null
+                    values.clear()
+                    values.put(MediaStore.Video.Media.IS_PENDING, 0)
+                    resolver.update(uri, values, null, null)
+                    uri
+                } catch (e: Exception) {
+                    runCatching { resolver.delete(uri, null, null) }
+                    throw e
                 }
-                values.clear()
-                values.put(MediaStore.Downloads.IS_PENDING, 0)
-                resolver.update(uri, values, null, null)
-                uri
             } else {
-                null
+                @Suppress("DEPRECATION")
+                val moviesDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES)
+                val targetDir = File(moviesDir, "HindiDubStudio")
+                val created = targetDir.exists() || targetDir.mkdirs()
+                if (!created || !targetDir.canWrite()) {
+                    return@withContext null
+                }
+                val dest = File(targetDir, displayName)
+                mp4File.inputStream().use { input ->
+                    dest.outputStream().use { out -> input.copyTo(out) }
+                }
+                MediaScannerConnection.scanFile(
+                    context.applicationContext,
+                    arrayOf(dest.absolutePath),
+                    arrayOf("video/mp4"),
+                    null
+                )
+                Uri.fromFile(dest)
             }
         }
+
+    suspend fun saveToDownloads(context: Context, mp4File: File, displayName: String): Uri? =
+        saveToGallery(context, mp4File, displayName)
 
     suspend fun copyToUri(context: Context, mp4File: File, targetUri: Uri) =
         withContext(Dispatchers.IO) {

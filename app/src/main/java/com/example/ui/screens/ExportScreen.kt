@@ -386,7 +386,7 @@ fun ExportScreen(
                                     ) {
                                         Icon(Icons.Filled.Download, contentDescription = null)
                                         Spacer(modifier = Modifier.width(6.dp))
-                                        Text("Downloads")
+                                        Text("Save Gallery")
                                     }
 
                                     Button(

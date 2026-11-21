@@ -1,19 +1,25 @@
 package com.example
 
 import com.example.ai.LocalGgufTranslator
+import com.example.ai.OnDeviceModelManager
 import com.example.ai.OnDeviceSpeakerAnalyzer
 import com.example.ai.ResumableHttpDownloader
 import com.example.ai.TranscriptRepairHelper
 import com.example.data.local.DialogueSegmentEntity
 import com.example.data.local.DialogueStyle
 import com.example.data.local.SpeakerEntity
+import com.example.data.local.SubtitleLanguage
+import com.example.media.AudioMixer
 import com.example.media.SrtSubtitleParser
+import com.example.media.SubtitleCue
 import com.example.media.VocalIsolationFilter
+import com.example.media.WavUtils
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import java.security.MessageDigest
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -240,5 +246,169 @@ class SceneContextAndResumeTest {
         assertTrue(prompt.contains("Next line: \"I want you tonight.\""))
         assertTrue(prompt.contains("Speaker: MALE talking to FEMALE (whisper)"))
         assertTrue(prompt.contains("phonetic typos"))
+    }
+
+    @Test
+    fun `AudioMixer prevents non-overlapping TTS clip from bleeding into next speaker slot`() = runTest {
+        val sampleRate = 44100
+        val channels = 2
+        val totalFrames = sampleRate * 3 // 3 seconds
+        val silentBed = ShortArray(totalFrames * channels) { 0 }
+
+        // Clip 1 starts at 0.2s and is 2.0s long (would collide with clip 2 starting at 1.0s)
+        val clip1Samples = ShortArray(sampleRate * 2 * channels) { 12000 }
+        // Clip 2 starts at 1.0s and is 0.5s long with quiet constant amplitude 2000
+        val clip2Samples = ShortArray((sampleRate / 2) * channels) { 2000 }
+
+        val origWav = tempFolder.newFile("c_orig.wav")
+        val bgmWav = tempFolder.newFile("c_bgm.wav")
+        val tts1Wav = tempFolder.newFile("c_tts1.wav")
+        val tts2Wav = tempFolder.newFile("c_tts2.wav")
+        val outWav = tempFolder.newFile("c_mixed.wav")
+
+        WavUtils.writePcmBytesAsWav(WavUtils.shortArrayToBytes(silentBed), sampleRate, channels, origWav)
+        WavUtils.writePcmBytesAsWav(WavUtils.shortArrayToBytes(silentBed), sampleRate, channels, bgmWav)
+        WavUtils.writePcmBytesAsWav(WavUtils.shortArrayToBytes(clip1Samples), sampleRate, channels, tts1Wav)
+        WavUtils.writePcmBytesAsWav(WavUtils.shortArrayToBytes(clip2Samples), sampleRate, channels, tts2Wav)
+
+        val seg1 = DialogueSegmentEntity(
+            id = 1L, projectId = 1L, chunkIndex = 0, orderIndex = 0,
+            startMs = 200L, endMs = 800L, speakerLabel = "SPEAKER_1",
+            englishText = "Long first line", hindiText = "पहली लंबी लाइन",
+            isOverlapping = false, audioType = "SPEECH"
+        )
+        val seg2 = DialogueSegmentEntity(
+            id = 2L, projectId = 1L, chunkIndex = 0, orderIndex = 1,
+            startMs = 1000L, endMs = 1500L, speakerLabel = "SPEAKER_2",
+            englishText = "Second line", hindiText = "दूसरी लाइन",
+            isOverlapping = false, audioType = "SPEECH"
+        )
+
+        AudioMixer.mixChunk(
+            origWavFile = origWav,
+            bgmWavFile = bgmWav,
+            ttsSegments = listOf(
+                AudioMixer.PositionedTts(seg1, tts1Wav),
+                AudioMixer.PositionedTts(seg2, tts2Wav)
+            ),
+            chunkStartMs = 0L,
+            hindiVolume = 1.0f,
+            bgmVolume = 0.0f,
+            originalVolume = 0.0f,
+            outputMixedWav = outWav
+        )
+
+        val hdr = WavUtils.readHeader(outWav)
+        val mixedShorts = WavUtils.bytesToShortArray(
+            outWav.readBytes().copyOfRange(hdr.dataOffset.toInt(), outWav.length().toInt())
+        )
+        // Inside Clip 2 window (1.1s mark = frame ~48510), only Clip 2 (~2000) should be heard, NOT 12000 + 2000!
+        val checkIdx = (48510 * channels)
+        assertTrue(
+            "Expected clip 1 to fade out before clip 2 (got ${mixedShorts[checkIdx]})",
+            abs(mixedShorts[checkIdx].toInt()) <= 2500
+        )
+    }
+
+    @Test
+    fun `OnDeviceSpeakerAnalyzer pitch hysteresis keeps same speaker stable under minor pitch drift`() {
+        val sampleRate = 16000
+        val pcm = ShortArray(sampleRate * 4)
+        // 0..1s: Male ~126 Hz
+        for (i in 0 until sampleRate) {
+            pcm[i] = (sin(2.0 * PI * 126.0 * i / sampleRate) * 12000).toInt().toShort()
+        }
+        // 1..2s: Same Male slightly excited ~138 Hz (within +/-22 Hz hysteresis, would previously flip!)
+        for (i in sampleRate until sampleRate * 2) {
+            pcm[i] = (sin(2.0 * PI * 138.0 * i / sampleRate) * 12000).toInt().toShort()
+        }
+        // 3..4s: Female ~225 Hz (new speaker)
+        for (i in sampleRate * 3 until sampleRate * 4) {
+            pcm[i] = (sin(2.0 * PI * 225.0 * i / sampleRate) * 12000).toInt().toShort()
+        }
+        val sttWav = tempFolder.newFile("hysteresis_pitch.wav")
+        WavUtils.writePcmBytesAsWav(WavUtils.shortArrayToBytes(pcm), sampleRate, 1, sttWav)
+
+        val res = OnDeviceSpeakerAnalyzer.analyzeSpeakersAndBuildTimeline(
+            sttWavFile = sttWav,
+            phrases = listOf(
+                OnDeviceSpeakerAnalyzer.SpeechRawPhrase(50L, 950L, "First sentence here."),
+                OnDeviceSpeakerAnalyzer.SpeechRawPhrase(1050L, 1950L, "Second sentence here."),
+                OnDeviceSpeakerAnalyzer.SpeechRawPhrase(3050L, 3950L, "Third female sentence.")
+            ),
+            chunkDurationMs = 4000L,
+            mergeChoppyPhrases = false
+        )
+
+        val speechSegs = res.segments.filter { it.audioType == "SPEECH" }
+        assertEquals(3, speechSegs.size)
+        assertEquals(speechSegs[0].speakerLabel, speechSegs[1].speakerLabel)
+        assertFalse(speechSegs[0].speakerLabel == speechSegs[2].speakerLabel)
+        assertEquals(2, res.speakers.size)
+    }
+
+    @Test
+    fun `SrtSubtitleParser detects Devanagari Hindi vs English subtitles`() {
+        val enCues = listOf(SubtitleCue(0L, 1000L, "Where are you going now?"))
+        val hiCues = listOf(SubtitleCue(0L, 1000L, "तुम अभी कहाँ जा रहे हो?"))
+        assertEquals(SubtitleLanguage.ENGLISH, SrtSubtitleParser.detectLikelyLanguage(enCues))
+        assertEquals(SubtitleLanguage.HINDI, SrtSubtitleParser.detectLikelyLanguage(hiCues))
+    }
+
+    @Test
+    fun `OnDeviceModelManager validates GGML magic bytes and ResumableHttpDownloader enforces SHA-256`() = runTest {
+        val validGgml = tempFolder.newFile("ggml-tiny.en.bin").apply {
+            writeBytes("lmgg".toByteArray(Charsets.US_ASCII) + ByteArray(2048))
+        }
+        val htmlSpoof = tempFolder.newFile("bad-ggml.bin").apply {
+            writeBytes("<!DOCTYPE html>".toByteArray(Charsets.US_ASCII) + ByteArray(2048))
+        }
+        assertTrue(OnDeviceModelManager.isValidGgmlFile(validGgml))
+        assertFalse(OnDeviceModelManager.isValidGgmlFile(htmlSpoof))
+
+        val payload = ByteArray(512) { idx -> (idx * 7).toByte() }
+        val expectedSha = MessageDigest.getInstance("SHA-256")
+            .digest(payload)
+            .joinToString("") { "%02x".format(it) }
+
+        val server = ServerSocket(0)
+        val serverThread = thread {
+            server.use { srv ->
+                val sock = srv.accept()
+                sock.use { client ->
+                    val reader = BufferedReader(InputStreamReader(client.getInputStream()))
+                    while (true) {
+                        val line = reader.readLine() ?: break
+                        if (line.isEmpty()) break
+                    }
+                    val headers = "HTTP/1.1 200 OK\r\nContent-Length: ${payload.size}\r\nConnection: close\r\n\r\n"
+                    val out = client.getOutputStream()
+                    out.write(headers.toByteArray(Charsets.US_ASCII))
+                    out.write(payload)
+                    out.flush()
+                }
+            }
+        }
+
+        val partBad = tempFolder.newFile("bad_sha.bin.part").apply { delete() }
+        val destBad = tempFolder.newFile("bad_sha.bin").apply { delete() }
+        var failedOnBadSha = false
+        try {
+            ResumableHttpDownloader.downloadToFile(
+                url = "http://127.0.0.1:${server.localPort}/file.bin",
+                partFile = partBad,
+                destFile = destBad,
+                fallbackApproxBytes = payload.size.toLong(),
+                expectedSha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+            ) { _, _ -> }
+        } catch (e: IllegalStateException) {
+            failedOnBadSha = e.message?.contains("checksum", ignoreCase = true) == true
+        }
+        serverThread.join(3000L)
+        assertTrue(failedOnBadSha)
+        assertFalse(destBad.exists())
+
+        // Verify exact matching SHA-256 succeeds
+        assertEquals(expectedSha, ResumableHttpDownloader.computeSha256(tempFolder.newFile("good.bin").apply { writeBytes(payload) }))
     }
 }

@@ -30,6 +30,7 @@ import com.example.data.local.ProcessingStage
 import com.example.data.local.ProjectStatus
 import com.example.data.local.SegmentStatus
 import com.example.data.local.SpeakerEntity
+import com.example.data.local.SubtitleLanguage
 import com.example.media.AudioChunkExtractor
 import com.example.media.AudioMixer
 import com.example.media.AudioSeparator
@@ -173,6 +174,7 @@ class DubbingWorker(
             ?.let { subFile -> runCatching { SrtSubtitleParser.parse(subFile.readText()) }.getOrNull() }
             ?: emptyList()
         val hasSubtitleFile = parsedSubtitleCues.isNotEmpty()
+        val isDirectHindiSubtitles = hasSubtitleFile && project.subtitleLanguage == SubtitleLanguage.HINDI
 
         var activeGgufFile: File? = null
         if (useOnDevice) {
@@ -357,6 +359,7 @@ class DubbingWorker(
                     val entities = sttResult.segments.mapIndexed { orderIdx, seg ->
                         val isVocalMusic = seg.audioType == "SPEECH" &&
                             VocalSfxClassifier.isNonLexicalVocalSound(seg.englishText)
+                        val directHindi = isDirectHindiSubtitles && !isVocalMusic && seg.audioType == "SPEECH"
                         DialogueSegmentEntity(
                             projectId = projectId,
                             chunkIndex = chunk.chunkIndex,
@@ -365,11 +368,12 @@ class DubbingWorker(
                             endMs = chunk.startMs + seg.endOffsetMs,
                             speakerLabel = if (isVocalMusic) "AMBIENT" else seg.speakerLabel,
                             englishText = seg.englishText,
+                            hindiText = if (directHindi) seg.englishText else "",
                             emotion = if (isVocalMusic) "neutral" else seg.emotion,
                             isOverlapping = seg.isOverlapping,
                             audioType = if (isVocalMusic) "VOCAL_SFX" else seg.audioType,
                             speechSpeed = project.defaultSpeechSpeed,
-                            status = SegmentStatus.TRANSCRIBED
+                            status = if (directHindi) SegmentStatus.TRANSLATED else SegmentStatus.TRANSCRIBED
                         )
                     }
                     repository.insertSegments(entities)
@@ -414,7 +418,11 @@ class DubbingWorker(
                     updateStage(
                         projectId = projectId,
                         title = project.title,
-                        stage = "${ProcessingStage.TRANSLATING} (${chunk.chunkIndex + 1}/$totalChunks)",
+                        stage = if (isDirectHindiSubtitles) {
+                            "Using Hindi Subtitles (${chunk.chunkIndex + 1}/$totalChunks)"
+                        } else {
+                            "${ProcessingStage.TRANSLATING} (${chunk.chunkIndex + 1}/$totalChunks)"
+                        },
                         chunkIndex = chunk.chunkIndex,
                         subStepFraction = 0.45f,
                         chunkWorkProgress = chunkWorkProgress,
@@ -423,7 +431,17 @@ class DubbingWorker(
                     )
                     project = repository.getProject(projectId) ?: project
                     val speakers = repository.getSpeakers(projectId)
-                    if (untranslated.isNotEmpty()) {
+                    if (isDirectHindiSubtitles && untranslated.isNotEmpty()) {
+                        for (seg in untranslated) {
+                            repository.updateSegment(
+                                seg.copy(
+                                    hindiText = seg.englishText,
+                                    status = SegmentStatus.TRANSLATED,
+                                    errorMessage = null
+                                )
+                            )
+                        }
+                    } else if (untranslated.isNotEmpty()) {
                         val untranslatedById = untranslated.associateBy { it.id }
                         val alreadySavedIds = mutableSetOf<Long>()
                         val translations = when {
@@ -552,6 +570,12 @@ class DubbingWorker(
                     }
                 }
 
+                val nextSpeechStartById = buildMap<Long, Long?> {
+                    for (i in speechSegments.indices) {
+                        put(speechSegments[i].id, speechSegments.getOrNull(i + 1)?.startMs)
+                    }
+                }
+
                 if (segmentsToSynthesize.isNotEmpty()) {
                     for ((sIdx, seg) in segmentsToSynthesize.withIndex()) {
                         if (shouldStopOrPause(projectId)) return markPausedAndReturn(projectId)
@@ -572,6 +596,13 @@ class DubbingWorker(
                         val voicePreset = speaker?.voicePresetName ?: project.defaultVoicePreset.ifBlank { "Kore" }
                         val speed = (speaker?.speedMultiplier ?: seg.speechSpeed).coerceIn(0.75f, 1.35f)
                         val ttsOut = File(ttsDir, "seg_${seg.id}_tts.wav")
+                        val rawSlotMs = (seg.endMs - seg.startMs).coerceAtLeast(400L)
+                        val nextSpeechStartMs = nextSpeechStartById[seg.id]
+                        val availableSlotMs = if (nextSpeechStartMs != null && nextSpeechStartMs > seg.startMs + 50L) {
+                            maxOf(rawSlotMs, nextSpeechStartMs - seg.startMs - 50L).coerceAtMost(rawSlotMs * 2L)
+                        } else {
+                            rawSlotMs
+                        }
 
                         try {
                             val ttsDurationMs = if (useOnDevice) {
@@ -580,7 +611,7 @@ class DubbingWorker(
                                     voicePresetName = voicePreset,
                                     emotion = seg.emotion,
                                     speedMultiplier = speed,
-                                    targetSlotDurationMs = (seg.endMs - seg.startMs).coerceAtLeast(400L),
+                                    targetSlotDurationMs = availableSlotMs,
                                     outWavFile = ttsOut,
                                     tempCacheDir = applicationContext.cacheDir
                                 )
@@ -591,7 +622,7 @@ class DubbingWorker(
                                         voicePresetName = voicePreset,
                                         emotion = seg.emotion,
                                         speedMultiplier = speed,
-                                        targetSlotDurationMs = (seg.endMs - seg.startMs).coerceAtLeast(400L),
+                                        targetSlotDurationMs = availableSlotMs,
                                         outWavFile = ttsOut,
                                         tempCacheDir = applicationContext.cacheDir
                                     )

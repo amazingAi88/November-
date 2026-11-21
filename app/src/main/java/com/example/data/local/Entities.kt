@@ -90,6 +90,18 @@ object SttEngineMode {
     }
 }
 
+object SubtitleLanguage {
+    const val ENGLISH = "EN"
+    const val HINDI = "HI"
+
+    val all = listOf(ENGLISH, HINDI)
+
+    fun displayLabel(lang: String): String = when (lang) {
+        HINDI -> "Hindi (.SRT → Direct Dub)"
+        else -> "English (.SRT → Translate)"
+    }
+}
+
 @Entity(tableName = "movie_projects")
 data class MovieProjectEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
@@ -129,6 +141,7 @@ data class MovieProjectEntity(
     val tempFilesCleaned: Boolean = false,
     val subtitlePath: String? = null,
     val subtitleFileName: String? = null,
+    val subtitleLanguage: String = SubtitleLanguage.ENGLISH,
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis()
 )

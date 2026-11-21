@@ -24,9 +24,11 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Book
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CleaningServices
+import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.FileOpen
@@ -99,6 +101,7 @@ import com.example.ui.theme.ObsidianSurface
 import com.example.ui.theme.ObsidianSurfaceVariant
 import com.example.ui.theme.SaffronContainer
 import com.example.ui.theme.SaffronGold
+import com.example.ui.viewmodel.GeminiCloudUiState
 import com.example.ui.viewmodel.SettingsViewModel
 import java.util.Locale
 
@@ -124,12 +127,14 @@ fun SettingsScreen(
     val ggufProgressText by viewModel.ggufProgressText.collectAsStateWithLifecycle()
     val sampleTestOutput by viewModel.sampleTestOutput.collectAsStateWithLifecycle()
     val isTestingSample by viewModel.isTestingSample.collectAsStateWithLifecycle()
+    val geminiCloudState by viewModel.geminiCloudState.collectAsStateWithLifecycle()
     val slangConfig by viewModel.slangConfig.collectAsStateWithLifecycle()
     val hardwareCodecs by viewModel.hardwareCodecs.collectAsStateWithLifecycle()
 
     val message by viewModel.message.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     var testDialogueInput by remember { mutableStateOf("What the hell are you doing, man?") }
+    var geminiTestInput by remember { mutableStateOf("Don't worry, we will get out of here before sunset.") }
 
     val ggufPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -217,11 +222,12 @@ fun SettingsScreen(
                                 FilterChip(
                                     selected = prefs.defaultEngineMode == EngineMode.GEMINI_CLOUD,
                                     onClick = { viewModel.setEngineMode(EngineMode.GEMINI_CLOUD) },
-                                    label = { Text("Gemini Cloud AI") },
+                                    label = { Text("Gemini Cloud AI (Optional)") },
                                     colors = FilterChipDefaults.filterChipColors(
                                         selectedContainerColor = SaffronContainer,
                                         selectedLabelColor = SaffronGold
-                                    )
+                                    ),
+                                    modifier = Modifier.testTag("default_engine_gemini_chip")
                                 )
                             }
 
@@ -494,6 +500,195 @@ fun SettingsScreen(
                                         modifier = Modifier.testTag("settings_muxer_timeout_$sec")
                                     )
                                 }
+                            }
+                        }
+                    }
+                }
+
+                // Optional Gemini Cloud AI Card (Firebase AI Logic + App Check, Zero API Key)
+                item {
+                    val isGeminiDefault = prefs.defaultEngineMode == EngineMode.GEMINI_CLOUD
+                    val isGeminiTesting = geminiCloudState is GeminiCloudUiState.Loading
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("gemini_cloud_settings_card"),
+                        colors = CardDefaults.cardColors(containerColor = ObsidianSurface),
+                        border = BorderStroke(
+                            width = 1.dp,
+                            color = if (isGeminiDefault) EmeraldSuccess.copy(alpha = 0.65f) else ElectricCyan.copy(alpha = 0.5f)
+                        ),
+                        shape = MaterialTheme.shapes.large
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Filled.Cloud,
+                                        contentDescription = null,
+                                        tint = if (isGeminiDefault) EmeraldSuccess else ElectricCyan
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Column {
+                                        Text(
+                                            "Optional Gemini Cloud AI Mode",
+                                            style = MaterialTheme.typography.titleMedium
+                                        )
+                                        Text(
+                                            "Firebase AI Logic • No API key required",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                                StatusPill(
+                                    label = if (isGeminiDefault) "DEFAULT" else "OPTIONAL",
+                                    tone = if (isGeminiDefault) "SUCCESS" else "ACTIVE"
+                                )
+                            }
+
+                            Text(
+                                text = "Uses gemini-3.8-flash for multi-speaker audio transcription & scene-context Hindi translation, plus gemini-3.1-flash-tts-preview for expressive Hindi voices. Protected by Firebase App Check — completely optional per project.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+
+                            OutlinedButton(
+                                onClick = {
+                                    viewModel.setEngineMode(
+                                        if (isGeminiDefault) EngineMode.ON_DEVICE_FREE else EngineMode.GEMINI_CLOUD
+                                    )
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(48.dp)
+                                    .testTag("toggle_gemini_default_button")
+                            ) {
+                                Icon(
+                                    imageVector = if (isGeminiDefault) Icons.Filled.Check else Icons.Filled.AutoAwesome,
+                                    contentDescription = null,
+                                    tint = if (isGeminiDefault) EmeraldSuccess else SaffronGold
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    if (isGeminiDefault) {
+                                        "Gemini Cloud is Default (Tap to Switch to ₹0 On-Device)"
+                                    } else {
+                                        "Set Gemini Cloud AI as Default for New Projects"
+                                    }
+                                )
+                            }
+
+                            HorizontalDivider(color = ObsidianBorder)
+                            Text(
+                                "Test Gemini Cloud Live (${prefs.defaultDialogueStyle})",
+                                style = MaterialTheme.typography.titleSmall
+                            )
+                            OutlinedTextField(
+                                value = geminiTestInput,
+                                onValueChange = { geminiTestInput = it },
+                                label = { Text("Sample English Dialogue") },
+                                singleLine = true,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("test_gemini_cloud_input")
+                            )
+                            Button(
+                                onClick = {
+                                    viewModel.testGeminiCloudSample(geminiTestInput, prefs.defaultDialogueStyle)
+                                },
+                                enabled = !isGeminiTesting && geminiTestInput.isNotBlank(),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(48.dp)
+                                    .testTag("test_gemini_cloud_button"),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = ElectricCyan,
+                                    contentColor = ObsidianNight
+                                )
+                            ) {
+                                if (isGeminiTesting) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(18.dp),
+                                        strokeWidth = 2.dp,
+                                        color = ObsidianNight
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text("Contacting Firebase AI Logic...")
+                                } else {
+                                    Icon(Icons.Filled.AutoAwesome, contentDescription = null)
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Test Gemini Cloud Translation")
+                                }
+                            }
+
+                            when (val cloudState = geminiCloudState) {
+                                is GeminiCloudUiState.Success -> {
+                                    Surface(
+                                        color = ObsidianElevated,
+                                        shape = MaterialTheme.shapes.medium,
+                                        border = BorderStroke(1.dp, EmeraldSuccess.copy(alpha = 0.6f))
+                                    ) {
+                                        Column(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(12.dp),
+                                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                                        ) {
+                                            Text(
+                                                text = cloudState.hindiText,
+                                                style = MaterialTheme.typography.titleSmall,
+                                                color = EmeraldSuccess
+                                            )
+                                            Text(
+                                                text = "Emotion: ${cloudState.emotion} • Latency: ${cloudState.latencyMs} ms • App Check Verified",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
+                                }
+                                is GeminiCloudUiState.Error -> {
+                                    Surface(
+                                        modifier = Modifier.testTag("gemini_cloud_error_banner"),
+                                        color = ObsidianElevated,
+                                        shape = MaterialTheme.shapes.medium,
+                                        border = BorderStroke(1.dp, ErrorCrimson.copy(alpha = 0.65f))
+                                    ) {
+                                        Column(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(12.dp),
+                                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                                        ) {
+                                            Text(
+                                                text = when {
+                                                    cloudState.isAppCheckError -> "App Check / Auth Notice"
+                                                    cloudState.isQuotaError -> "Cloud Free-Tier Rate Limit (429)"
+                                                    else -> "Gemini Cloud Error"
+                                                },
+                                                style = MaterialTheme.typography.labelLarge,
+                                                color = ErrorCrimson
+                                            )
+                                            Text(
+                                                text = cloudState.message,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
+                                }
+                                else -> Unit
                             }
                         }
                     }

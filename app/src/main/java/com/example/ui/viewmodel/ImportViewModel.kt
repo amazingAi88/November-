@@ -9,6 +9,7 @@ import com.example.data.local.DubbingRepository
 import com.example.data.local.MovieProjectEntity
 import com.example.data.local.PreferencesRepository
 import com.example.data.local.SeparationMode
+import com.example.data.local.SubtitleLanguage
 import android.provider.OpenableColumns
 import com.example.media.InspectedMovie
 import com.example.media.MediaAccelSettings
@@ -33,7 +34,8 @@ sealed interface ImportUiState {
         val chunkDurationSec: Int,
         val subtitleFileName: String? = null,
         val subtitleCueCount: Int = 0,
-        val subtitleRawContent: String? = null
+        val subtitleRawContent: String? = null,
+        val subtitleLanguage: String = SubtitleLanguage.ENGLISH
     ) : ImportUiState
     data class Error(val message: String) : ImportUiState
 }
@@ -112,15 +114,22 @@ class ImportViewModel(application: Application) : AndroidViewModel(application) 
                     _subtitleError.value = "No valid .srt or .vtt cues found in $displayName."
                     return@launch
                 }
+                val detectedLang = SrtSubtitleParser.detectLikelyLanguage(cues)
                 _uiState.value = current.copy(
                     subtitleFileName = displayName,
                     subtitleCueCount = cues.size,
-                    subtitleRawContent = rawText
+                    subtitleRawContent = rawText,
+                    subtitleLanguage = detectedLang
                 )
             } catch (e: Exception) {
                 _subtitleError.value = e.localizedMessage ?: "Failed to parse subtitle file."
             }
         }
+    }
+
+    fun updateSubtitleLanguage(language: String) {
+        val current = _uiState.value as? ImportUiState.Ready ?: return
+        _uiState.value = current.copy(subtitleLanguage = language)
     }
 
     fun clearAttachedSubtitle() {
@@ -129,7 +138,8 @@ class ImportViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.value = current.copy(
             subtitleFileName = null,
             subtitleCueCount = 0,
-            subtitleRawContent = null
+            subtitleRawContent = null,
+            subtitleLanguage = SubtitleLanguage.ENGLISH
         )
     }
 
@@ -194,7 +204,8 @@ class ImportViewModel(application: Application) : AndroidViewModel(application) 
                 kotlinx.coroutines.withContext(Dispatchers.IO) { destSub.writeText(rawSub) }
                 updatedProj = updatedProj?.copy(
                     subtitlePath = destSub.absolutePath,
-                    subtitleFileName = subName
+                    subtitleFileName = subName,
+                    subtitleLanguage = current.subtitleLanguage
                 )
             }
             if (updatedProj != null) {

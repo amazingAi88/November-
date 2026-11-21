@@ -48,6 +48,7 @@ object OnDeviceSpeakerAnalyzer {
         }
 
         val discoveredSpeakers = linkedMapOf<String, TranscribedSpeaker>()
+        val speakerClusters = mutableListOf<PitchCluster>()
         val timeline = mutableListOf<TranscribedSegment>()
 
         var cursorMs = 0L
@@ -98,7 +99,10 @@ object OnDeviceSpeakerAnalyzer {
                 )
             } else {
                 val pitchHz = estimateMedianPitchHz(pcmMono, sampleRate, sMs, eMs)
-                val (speakerId, gender, traits) = classifySpeakerFromPitch(pitchHz)
+                val (speakerId, gender, traits) = assignSpeakerWithHysteresis(
+                    pitchHz = pitchHz,
+                    clusters = speakerClusters
+                )
 
                 if (!discoveredSpeakers.containsKey(speakerId)) {
                     discoveredSpeakers[speakerId] = TranscribedSpeaker(
@@ -145,14 +149,67 @@ object OnDeviceSpeakerAnalyzer {
         )
     }
 
-    private fun classifySpeakerFromPitch(pitchHz: Float?): Triple<String, String, String> {
-        return when {
-            pitchHz == null -> Triple("SPEAKER_1", "MALE", "Default voice profile (pitch ambiguous)")
-            pitchHz < 130f -> Triple("SPEAKER_1", "MALE", "Deep male pitch (~${pitchHz.roundToInt()} Hz)")
-            pitchHz < 166f -> Triple("SPEAKER_3", "MALE", "Warm male pitch (~${pitchHz.roundToInt()} Hz)")
-            pitchHz <= 280f -> Triple("SPEAKER_2", "FEMALE", "Female pitch (~${pitchHz.roundToInt()} Hz)")
-            else -> Triple("SPEAKER_4", "NEUTRAL", "High/youthful pitch (~${pitchHz.roundToInt()} Hz)")
+    private data class PitchCluster(
+        val speakerId: String,
+        val gender: String,
+        var centroidHz: Float,
+        var sampleCount: Int
+    )
+
+    private fun assignSpeakerWithHysteresis(
+        pitchHz: Float?,
+        clusters: MutableList<PitchCluster>
+    ): Triple<String, String, String> {
+        if (pitchHz == null) {
+            val existingFirst = clusters.firstOrNull()
+            return if (existingFirst != null) {
+                Triple(existingFirst.speakerId, existingFirst.gender, "Continued speaker profile (pitch ambiguous)")
+            } else {
+                Triple("SPEAKER_1", "MALE", "Default voice profile (pitch ambiguous)")
+            }
         }
+
+        // Hysteresis tolerance: stay locked on the closest known speaker within ±22 Hz
+        // and inside the same broad vocal register (male < 165 Hz vs female >= 165 Hz).
+        val baseGender = inferGenderFromPitch(pitchHz)
+        val matchingCluster = clusters
+            .filter { it.gender == baseGender && abs(it.centroidHz - pitchHz) <= 22f }
+            .minByOrNull { abs(it.centroidHz - pitchHz) }
+
+        if (matchingCluster != null) {
+            val newCount = matchingCluster.sampleCount + 1
+            matchingCluster.centroidHz =
+                ((matchingCluster.centroidHz * matchingCluster.sampleCount) + pitchHz) / newCount
+            matchingCluster.sampleCount = newCount
+            return Triple(
+                matchingCluster.speakerId,
+                matchingCluster.gender,
+                "Clustered ${matchingCluster.gender.lowercase()} voice (~${matchingCluster.centroidHz.roundToInt()} Hz)"
+            )
+        }
+
+        if (clusters.size < 4) {
+            val newId = "SPEAKER_${clusters.size + 1}"
+            clusters.add(
+                PitchCluster(
+                    speakerId = newId,
+                    gender = baseGender,
+                    centroidHz = pitchHz,
+                    sampleCount = 1
+                )
+            )
+            return Triple(newId, baseGender, "${baseGender.lowercase().replaceFirstChar { it.uppercase() }} pitch (~${pitchHz.roundToInt()} Hz)")
+        }
+
+        // Fallback if already at 4 active clusters: pick closest centroid
+        val nearest = clusters.minBy { abs(it.centroidHz - pitchHz) }
+        return Triple(nearest.speakerId, nearest.gender, "Matched nearest voice (~${nearest.centroidHz.roundToInt()} Hz)")
+    }
+
+    private fun inferGenderFromPitch(pitchHz: Float): String = when {
+        pitchHz < 165f -> "MALE"
+        pitchHz <= 280f -> "FEMALE"
+        else -> "NEUTRAL"
     }
 
     private fun estimateEmotionFromEnergy(

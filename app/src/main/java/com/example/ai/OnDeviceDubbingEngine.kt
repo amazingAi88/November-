@@ -439,10 +439,10 @@ class OnDeviceDubbingEngine(private val context: Context) {
                 throw IllegalStateException("Android TTS produced an empty audio file for \"$hindiText\".")
             }
 
-            // Read raw TTS WAV duration & compute gentle slot-fit time-scaling if slightly longer than scene gap
+            // Read raw TTS WAV duration & compute slot-fit time-scaling so Hindi dialogue fits cleanly without overlapping next line
             val rawHdr = runCatching { WavUtils.readHeader(rawTtsWav) }.getOrNull()
-            val fitScale = if (rawHdr != null && targetSlotDurationMs > 0L && rawHdr.durationMs > targetSlotDurationMs * 1.15) {
-                (rawHdr.durationMs.toFloat() / (targetSlotDurationMs * 1.05f)).coerceIn(1.0f, 1.32f)
+            val fitScale = if (rawHdr != null && targetSlotDurationMs > 0L && rawHdr.durationMs > targetSlotDurationMs * 1.04) {
+                (rawHdr.durationMs.toFloat() / (targetSlotDurationMs * 1.02f)).coerceIn(1.0f, 1.45f)
             } else 1.0f
 
             AudioChunkExtractor.convertWavFileToMixWav(

@@ -37,15 +37,21 @@ object AudioMixer {
         val totalFrames = (origHeader.dataSize / origHeader.bytesPerFrame).toInt()
         outputMixedWav.parentFile?.mkdirs()
 
-        // Precompute sample offsets for each valid TTS clip
+        // Precompute sample offsets for each valid TTS clip sorted chronologically
         data class TtsClipHandle(
             val startFrame: Long,
-            val endFrame: Long,
+            val rawEndFrame: Long,
+            val effectiveEndFrame: Long,
+            val fadeOutFrames: Long,
+            val isOverlapping: Boolean,
             val wavFile: File,
             val header: WavHeader
         )
 
-        val clipHandles = ttsSegments.mapNotNull { (seg, file) ->
+        val fadeGapFrames = ((sampleRate * 30L) / 1000L).coerceAtLeast(1L) // 30ms clean breath gap
+        val defaultFadeOutFrames = ((sampleRate * 35L) / 1000L).coerceAtLeast(1L) // 35ms click-free fade-out
+
+        val rawHandles = ttsSegments.mapNotNull { (seg, file) ->
             if (!file.exists()) return@mapNotNull null
             val hdr = runCatching { WavUtils.readHeader(file) }.getOrNull() ?: return@mapNotNull null
             val relStartMs = (seg.startMs - chunkStartMs).coerceAtLeast(0L)
@@ -53,9 +59,27 @@ object AudioMixer {
             val clipFrames = hdr.dataSize / hdr.bytesPerFrame.coerceAtLeast(1)
             TtsClipHandle(
                 startFrame = startFrame,
-                endFrame = startFrame + clipFrames,
+                rawEndFrame = startFrame + clipFrames,
+                effectiveEndFrame = startFrame + clipFrames,
+                fadeOutFrames = 0L,
+                isOverlapping = seg.isOverlapping,
                 wavFile = file,
                 header = hdr
+            )
+        }.sortedBy { it.startFrame }
+
+        val clipHandles = rawHandles.mapIndexed { idx, clip ->
+            val nextClip = rawHandles.getOrNull(idx + 1)
+            val cappedEnd = if (!clip.isOverlapping && nextClip != null && nextClip.startFrame > clip.startFrame) {
+                val maxBeforeNext = (nextClip.startFrame - fadeGapFrames).coerceAtLeast(clip.startFrame + 1L)
+                minOf(clip.rawEndFrame, maxBeforeNext)
+            } else {
+                clip.rawEndFrame
+            }
+            val wasTrimmed = cappedEnd < clip.rawEndFrame
+            clip.copy(
+                effectiveEndFrame = cappedEnd,
+                fadeOutFrames = if (wasTrimmed) minOf(defaultFadeOutFrames, cappedEnd - clip.startFrame) else 0L
             )
         }
 
@@ -115,9 +139,9 @@ object AudioMixer {
                         // Overlay active Hindi TTS segments overlapping [frameOffset, frameOffset + framesInWindow)
                         val winEnd = frameOffset + framesInWindow
                         for (clip in clipHandles) {
-                            if (clip.endFrame <= frameOffset || clip.startFrame >= winEnd) continue
+                            if (clip.effectiveEndFrame <= frameOffset || clip.startFrame >= winEnd) continue
                             val overlapStart = maxOf(frameOffset, clip.startFrame)
-                            val overlapEnd = minOf(winEnd, clip.endFrame)
+                            val overlapEnd = minOf(winEnd, clip.effectiveEndFrame)
                             val overlapFrames = (overlapEnd - overlapStart).toInt()
                             if (overlapFrames <= 0) continue
 
@@ -135,13 +159,19 @@ object AudioMixer {
                             }
                             val clipShorts = WavUtils.bytesToShortArray(clipBuf)
                             val dstStartFrame = (overlapStart - frameOffset).toInt()
+                            val fadeStartFrame = clip.effectiveEndFrame - clip.fadeOutFrames
 
                             for (f in 0 until overlapFrames) {
+                                val absFrame = overlapStart + f
+                                val env = if (clip.fadeOutFrames > 0L && absFrame >= fadeStartFrame) {
+                                    ((clip.effectiveEndFrame - absFrame).toFloat() / clip.fadeOutFrames.toFloat())
+                                        .coerceIn(0f, 1f)
+                                } else 1f
                                 val dstIdxBase = (dstStartFrame + f) * channels
                                 val srcIdxBase = f * clip.header.channels
                                 for (c in 0 until channels) {
                                     val srcC = c.coerceAtMost(clip.header.channels - 1)
-                                    val s = clipShorts[srcIdxBase + srcC].toFloat() * hindiVolume
+                                    val s = clipShorts[srcIdxBase + srcC].toFloat() * hindiVolume * env
                                     // Gentle BGM ducking (-3dB) where Hindi speech is actively speaking
                                     mixAccum[dstIdxBase + c] =
                                         (mixAccum[dstIdxBase + c] * 0.72f) + s

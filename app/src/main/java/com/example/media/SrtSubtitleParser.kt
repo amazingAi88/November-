@@ -116,6 +116,22 @@ object SrtSubtitleParser {
         }
     }
 
+    fun detectLikelyLanguage(cues: List<SubtitleCue>): String {
+        if (cues.isEmpty()) return com.example.data.local.SubtitleLanguage.ENGLISH
+        val sample = cues.take(20).joinToString(" ") { it.text }
+        var devanagariCount = 0
+        var alphaCount = 0
+        for (ch in sample) {
+            if (ch in '\u0900'..'\u097F') devanagariCount++
+            if (ch.isLetter()) alphaCount++
+        }
+        return if (alphaCount > 0 && devanagariCount * 4 >= alphaCount) {
+            com.example.data.local.SubtitleLanguage.HINDI
+        } else {
+            com.example.data.local.SubtitleLanguage.ENGLISH
+        }
+    }
+
     private fun cleanCueLine(line: String): String {
         var s = ASS_TAG_REGEX.replace(line, " ")
         s = HTML_TAG_REGEX.replace(s, " ")

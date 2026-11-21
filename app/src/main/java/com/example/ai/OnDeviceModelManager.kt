@@ -73,10 +73,25 @@ object OnDeviceModelManager {
         return File(whisperModelsDir(context), fileName)
     }
 
+    fun isValidGgmlFile(file: File): Boolean {
+        if (!file.exists() || !file.isFile || file.length() < 1024L) return false
+        return runCatching {
+            file.inputStream().use { ins ->
+                val magic = ByteArray(4)
+                val read = ins.read(magic)
+                // whisper.cpp GGML magic is 0x67676d6c ('lmgg' little-endian or 'ggml' big-endian)
+                read == 4 && (
+                    (magic[0] == 'l'.code.toByte() && magic[1] == 'm'.code.toByte() && magic[2] == 'g'.code.toByte() && magic[3] == 'g'.code.toByte()) ||
+                        (magic[0] == 'g'.code.toByte() && magic[1] == 'g'.code.toByte() && magic[2] == 'm'.code.toByte() && magic[3] == 'l'.code.toByte())
+                    )
+            }
+        }.getOrDefault(false)
+    }
+
     fun isWhisperModelReady(context: Context, sttEngineMode: String): Boolean {
         val f = whisperModelFile(context, sttEngineMode)
         val minBytes = if (sttEngineMode == SttEngineMode.WHISPER_BASE_EN) 25L * 1024L * 1024L else 15L * 1024L * 1024L
-        return f.exists() && f.isFile && f.length() >= minBytes
+        return f.exists() && f.isFile && f.length() >= minBytes && isValidGgmlFile(f)
     }
 
     fun isVoskModelReady(context: Context): Boolean {
@@ -217,7 +232,7 @@ object OnDeviceModelManager {
             destFile = destFile,
             fallbackApproxBytes = approxBytes,
             reportIntervalBytes = 512L * 1024L,
-            validateComplete = { f -> f.length() >= (approxBytes / 2L) }
+            validateComplete = { f -> f.length() >= (approxBytes / 2L) && isValidGgmlFile(f) }
         ) { doneBytes, totalBytes ->
             val dlMb = doneBytes / (1024f * 1024f)
             val totMb = totalBytes.coerceAtLeast(approxBytes) / (1024f * 1024f)

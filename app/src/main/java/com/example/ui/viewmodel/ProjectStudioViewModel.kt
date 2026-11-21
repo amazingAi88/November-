@@ -26,6 +26,7 @@ import com.example.data.local.ProjectStatus
 import com.example.data.local.SegmentStatus
 import com.example.data.local.SpeakerEntity
 import com.example.data.local.SttEngineMode
+import com.example.data.local.SubtitleLanguage
 import com.example.media.AudioChunkExtractor
 import com.example.media.AudioMixer
 import com.example.media.AudioPlaybackState
@@ -213,11 +214,23 @@ class ProjectStudioViewModel(
     fun attachSubtitleFile(uri: Uri) {
         viewModelScope.launch {
             try {
-                val (name, cueCount) = repository.saveSubtitleFromUri(projectId, uri)
-                _statusBanner.value = "Attached $name ($cueCount subtitle cues) — STT bypassed for exact dialogue."
+                val (name, cueCount, detectedLang) = repository.saveSubtitleFromUri(projectId, uri)
+                val langNote = if (detectedLang == SubtitleLanguage.HINDI) {
+                    "Detected Hindi — translation skipped cleanly."
+                } else {
+                    "STT bypassed for exact dialogue."
+                }
+                _statusBanner.value = "Attached $name ($cueCount cues) — $langNote"
             } catch (e: Exception) {
                 _statusBanner.value = e.localizedMessage ?: "Failed to load .srt / .vtt subtitle file."
             }
+        }
+    }
+
+    fun updateSubtitleLanguage(language: String) {
+        viewModelScope.launch {
+            val current = repository.getProject(projectId) ?: return@launch
+            repository.updateProject(current.copy(subtitleLanguage = language))
         }
     }
 
@@ -583,6 +596,9 @@ class ProjectStudioViewModel(
         }
         if (!sttReady) return false
 
+        val isDirectHindiSub = hasSubtitle && proj.subtitleLanguage == SubtitleLanguage.HINDI
+        if (isDirectHindiSub) return true
+
         return when (proj.engineMode) {
             EngineMode.ON_DEVICE_FREE -> {
                 if (hasSubtitle) {
@@ -906,9 +922,9 @@ class ProjectStudioViewModel(
                 return@launch
             }
             try {
-                val savedUri = VideoExporter.saveToDownloads(getApplication(), file, file.name)
+                val savedUri = VideoExporter.saveToGallery(getApplication(), file, file.name)
                 if (savedUri != null) {
-                    _statusBanner.value = "Saved to Downloads/HindiDubStudio/${file.name}"
+                    _statusBanner.value = "Saved to Gallery (Movies/HindiDubStudio/${file.name})"
                 } else {
                     onNeedSafFallback(file.name)
                 }

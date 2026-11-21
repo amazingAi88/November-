@@ -48,6 +48,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.data.local.SubtitleLanguage
 import com.example.media.MediaInspector
 import com.example.media.VideoExporter
 import com.example.media.WavUtils
@@ -360,6 +361,29 @@ fun ImportMovieScreen(
                                                 modifier = Modifier.testTag("clear_import_subtitle_button")
                                             ) {
                                                 Icon(Icons.Filled.Close, contentDescription = "Remove subtitle file")
+                                            }
+                                        }
+                                    }
+                                    if (state.subtitleCueCount > 0) {
+                                        Text(
+                                            text = "Subtitle Language",
+                                            style = MaterialTheme.typography.labelLarge
+                                        )
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            SubtitleLanguage.all.forEach { lang ->
+                                                FilterChip(
+                                                    selected = state.subtitleLanguage == lang,
+                                                    onClick = { viewModel.updateSubtitleLanguage(lang) },
+                                                    label = { Text(SubtitleLanguage.displayLabel(lang)) },
+                                                    colors = FilterChipDefaults.filterChipColors(
+                                                        selectedContainerColor = SaffronContainer,
+                                                        selectedLabelColor = SaffronGold
+                                                    ),
+                                                    modifier = Modifier.testTag("import_sub_lang_$lang")
+                                                )
                                             }
                                         }
                                     }

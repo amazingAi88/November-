@@ -8,6 +8,7 @@ import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.local.AppDatabase
 import com.example.data.local.MovieProjectEntity
+import com.example.data.local.SubtitleLanguage
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -22,7 +23,7 @@ import java.io.File
 class DatabaseMigrationRobolectricTest {
 
     @Test
-    fun `MIGRATION_3_4 adds nullable subtitlePath and subtitleFileName columns cleanly`() = runTest {
+    fun `MIGRATION_3_4 and MIGRATION_4_5 add subtitlePath, subtitleFileName, and subtitleLanguage cleanly`() = runTest {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val dbName = "migration_test_${System.currentTimeMillis()}.db"
         val dbFile = context.getDatabasePath(dbName)
@@ -107,16 +108,23 @@ class DatabaseMigrationRobolectricTest {
                 """.trimIndent()
             )
             AppDatabase.MIGRATION_3_4.migrate(rawDb)
+            AppDatabase.MIGRATION_4_5.migrate(rawDb)
             rawDb.execSQL("UPDATE movie_projects SET subtitlePath = '/tmp/sub.srt', subtitleFileName = 'sub.srt' WHERE id = 1")
-            rawDb.query("SELECT subtitlePath, subtitleFileName FROM movie_projects WHERE id = 1").use { c ->
+            rawDb.query("SELECT subtitlePath, subtitleFileName, subtitleLanguage FROM movie_projects WHERE id = 1").use { c ->
                 assertEquals(true, c.moveToFirst())
                 assertEquals("/tmp/sub.srt", c.getString(0))
                 assertEquals("sub.srt", c.getString(1))
+                assertEquals(SubtitleLanguage.ENGLISH, c.getString(2))
+            }
+            rawDb.execSQL("UPDATE movie_projects SET subtitleLanguage = 'HI' WHERE id = 1")
+            rawDb.query("SELECT subtitleLanguage FROM movie_projects WHERE id = 1").use { c ->
+                assertEquals(true, c.moveToFirst())
+                assertEquals(SubtitleLanguage.HINDI, c.getString(0))
             }
         }
         helper.close()
 
-        // Also validate in-memory v4 Room schema creation & subtitle updates
+        // Validate in-memory v5 Room schema creation & Hindi subtitle language updates
         val roomDb = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
             .allowMainThreadQueries()
             .build()
@@ -134,15 +142,20 @@ class DatabaseMigrationRobolectricTest {
                 audioChannels = 2,
                 audioSampleRate = 48000,
                 thumbnailPath = null,
-                subtitlePath = "/files/sub.srt",
-                subtitleFileName = "movie_en.srt"
+                subtitlePath = "/files/sub_hi.srt",
+                subtitleFileName = "movie_hi.srt",
+                subtitleLanguage = SubtitleLanguage.HINDI
             )
         )
         val loaded = roomDb.projectDao().getProject(id)!!
-        assertEquals("/files/sub.srt", loaded.subtitlePath)
-        assertEquals("movie_en.srt", loaded.subtitleFileName)
-        roomDb.projectDao().updateProject(loaded.copy(subtitlePath = null, subtitleFileName = null))
+        assertEquals("/files/sub_hi.srt", loaded.subtitlePath)
+        assertEquals("movie_hi.srt", loaded.subtitleFileName)
+        assertEquals(SubtitleLanguage.HINDI, loaded.subtitleLanguage)
+        roomDb.projectDao().updateProject(
+            loaded.copy(subtitlePath = null, subtitleFileName = null, subtitleLanguage = SubtitleLanguage.ENGLISH)
+        )
         assertNull(roomDb.projectDao().getProject(id)?.subtitlePath)
+        assertEquals(SubtitleLanguage.ENGLISH, roomDb.projectDao().getProject(id)?.subtitleLanguage)
         roomDb.close()
         File(dbFile.absolutePath).delete()
     }

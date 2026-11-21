@@ -8,6 +8,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.security.MessageDigest
 import kotlin.coroutines.coroutineContext
 
 /**
@@ -31,6 +32,7 @@ object ResumableHttpDownloader {
         destFile: File,
         fallbackApproxBytes: Long = 0L,
         reportIntervalBytes: Long = 512L * 1024L,
+        expectedSha256: String? = null,
         validateComplete: ((File) -> Boolean)? = null,
         onProgress: (downloadedBytes: Long, totalBytes: Long) -> Unit
     ): File = withContext(Dispatchers.IO) {
@@ -121,6 +123,14 @@ object ResumableHttpDownloader {
             throw IllegalStateException("Downloaded file ${destFile.name} failed integrity verification.")
         }
 
+        if (!expectedSha256.isNullOrBlank()) {
+            val actualHash = computeSha256(partFile)
+            if (!actualHash.equals(expectedSha256.trim(), ignoreCase = true)) {
+                partFile.delete()
+                throw IllegalStateException("Checksum verification failed for ${destFile.name} (expected ${expectedSha256.take(12)}..., got ${actualHash.take(12)}...).")
+            }
+        }
+
         if (destFile.exists()) destFile.delete()
         if (!partFile.renameTo(destFile)) {
             partFile.copyTo(destFile, overwrite = true)
@@ -129,6 +139,19 @@ object ResumableHttpDownloader {
         val finalSize = destFile.length()
         onProgress(finalSize, finalSize)
         destFile
+    }
+
+    internal fun computeSha256(file: File): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        val buf = ByteArray(64 * 1024)
+        BufferedInputStream(file.inputStream(), 64 * 1024).use { ins ->
+            while (true) {
+                val read = ins.read(buf)
+                if (read < 0) break
+                digest.update(buf, 0, read)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
     internal fun parse416Total(contentRange: String?): Long? {

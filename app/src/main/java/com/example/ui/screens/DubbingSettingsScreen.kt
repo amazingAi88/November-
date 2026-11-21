@@ -81,6 +81,7 @@ import com.example.data.local.DubbingSpeedMode
 import com.example.data.local.EngineMode
 import com.example.data.local.SpeakerEntity
 import com.example.data.local.SttEngineMode
+import com.example.data.local.SubtitleLanguage
 import com.example.media.AudioPlaybackState
 import com.example.media.WavUtils
 import com.example.ui.components.StatusPill
@@ -353,6 +354,51 @@ fun DubbingSettingsScreen(
                                     }
                                 }
                             }
+                            if (currentProject.engineMode == EngineMode.GEMINI_CLOUD) {
+                                Spacer(modifier = Modifier.height(10.dp))
+                                Surface(
+                                    modifier = Modifier.testTag("project_gemini_cloud_info_card"),
+                                    color = ObsidianElevated,
+                                    shape = RoundedCornerShape(10.dp),
+                                    border = BorderStroke(1.dp, ElectricCyan.copy(alpha = 0.55f))
+                                ) {
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(12.dp),
+                                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = "Firebase AI Logic Active",
+                                                style = MaterialTheme.typography.labelMedium,
+                                                color = ElectricCyan,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            StatusPill(label = "ZERO API KEY", tone = "SUCCESS")
+                                        }
+                                        Text(
+                                            text = "• Models: gemini-3.8-flash (Diarization & Scene-Context Translation) + gemini-3.1-flash-tts-preview (Neural Hindi Voices).\n• Optional Cloud Mode: Internet required. Free-tier 429 quota limits apply; attach an .SRT below to skip cloud audio upload.",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        OutlinedButton(
+                                            onClick = onOpenSettings,
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .height(48.dp)
+                                                .testTag("open_settings_from_gemini_card")
+                                        ) {
+                                            Text("Test Gemini Cloud Connection in Settings")
+                                        }
+                                    }
+                                }
+                            }
                             if (currentProject.engineMode == EngineMode.ON_DEVICE_FREE || currentProject.engineMode == EngineMode.ON_DEVICE_LLM) {
                                 Spacer(modifier = Modifier.height(10.dp))
                                 Text("Speech Recognition (STT) & Noise Filter", style = MaterialTheme.typography.titleSmall)
@@ -464,6 +510,26 @@ fun DubbingSettingsScreen(
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
+                            if (hasSub) {
+                                Text("Subtitle Language", style = MaterialTheme.typography.labelLarge)
+                                FlowRow(
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    SubtitleLanguage.all.forEach { lang ->
+                                        FilterChip(
+                                            selected = currentProject.subtitleLanguage == lang,
+                                            onClick = { viewModel.updateSubtitleLanguage(lang) },
+                                            label = { Text(SubtitleLanguage.displayLabel(lang)) },
+                                            colors = FilterChipDefaults.filterChipColors(
+                                                selectedContainerColor = SaffronContainer,
+                                                selectedLabelColor = SaffronGold
+                                            ),
+                                            modifier = Modifier.testTag("project_sub_lang_$lang")
+                                        )
+                                    }
+                                }
+                            }
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),

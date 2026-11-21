@@ -103,7 +103,7 @@ class DubbingRepository(
     fun exportsDir(): File =
         File(context.filesDir, "exports").apply { mkdirs() }
 
-    suspend fun saveSubtitleFromUri(projectId: Long, sourceUri: Uri): Pair<String, Int> = withContext(Dispatchers.IO) {
+    suspend fun saveSubtitleFromUri(projectId: Long, sourceUri: Uri): Triple<String, Int, String> = withContext(Dispatchers.IO) {
         var displayName = "subtitles.srt"
         context.contentResolver.query(sourceUri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
             if (c.moveToFirst()) {
@@ -120,6 +120,7 @@ class DubbingRepository(
         require(cues.isNotEmpty()) {
             "No valid .srt or .vtt subtitle cues found in $displayName."
         }
+        val detectedLang = SrtSubtitleParser.detectLikelyLanguage(cues)
         val safeExt = if (displayName.endsWith(".vtt", ignoreCase = true)) "vtt" else "srt"
         val destFile = File(projectDir(projectId), "imported_subtitles.$safeExt")
         destFile.writeText(rawText)
@@ -128,17 +129,24 @@ class DubbingRepository(
             updateProject(
                 proj.copy(
                     subtitlePath = destFile.absolutePath,
-                    subtitleFileName = displayName
+                    subtitleFileName = displayName,
+                    subtitleLanguage = detectedLang
                 )
             )
         }
-        displayName to cues.size
+        Triple(displayName, cues.size, detectedLang)
     }
 
     suspend fun clearProjectSubtitle(projectId: Long) = withContext(Dispatchers.IO) {
         val proj = getProject(projectId) ?: return@withContext
         proj.subtitlePath?.let { path -> runCatching { File(path).delete() } }
-        updateProject(proj.copy(subtitlePath = null, subtitleFileName = null))
+        updateProject(
+            proj.copy(
+                subtitlePath = null,
+                subtitleFileName = null,
+                subtitleLanguage = SubtitleLanguage.ENGLISH
+            )
+        )
     }
 
     suspend fun getTempWorkspaceSizeBytes(projectId: Long? = null): Long = withContext(Dispatchers.IO) {
