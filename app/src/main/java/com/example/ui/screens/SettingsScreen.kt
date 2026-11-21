@@ -31,6 +31,7 @@ import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.outlined.Lock
@@ -82,6 +83,7 @@ import com.example.data.local.DubbingSpeedMode
 import com.example.data.local.EngineMode
 import com.example.data.local.ExportQuality
 import com.example.data.local.MediaAccelMode
+import com.example.data.local.SttEngineMode
 import com.example.media.WavUtils
 import com.example.ui.components.StatusPill
 import com.example.ui.components.StudioDisclosureCard
@@ -115,6 +117,7 @@ fun SettingsScreen(
     val modelProgressText by viewModel.modelProgressText.collectAsStateWithLifecycle()
 
     val installedGgufModels by viewModel.installedGgufModels.collectAsStateWithLifecycle()
+    val partialGgufDownloads by viewModel.partialGgufDownloads.collectAsStateWithLifecycle()
     val deviceRamGb by viewModel.deviceRamGb.collectAsStateWithLifecycle()
     val isManagingGguf by viewModel.isManagingGguf.collectAsStateWithLifecycle()
     val ggufProgress by viewModel.ggufProgress.collectAsStateWithLifecycle()
@@ -615,7 +618,7 @@ fun SettingsScreen(
                             )
 
                             if (ggufProgress != null) {
-                                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                     LinearProgressIndicator(
                                         progress = { ggufProgress!!.coerceIn(0f, 1f) },
                                         modifier = Modifier
@@ -626,12 +629,35 @@ fun SettingsScreen(
                                         color = ElectricCyan,
                                         trackColor = ObsidianSurfaceVariant
                                     )
-                                    if (!ggufProgressText.isNullOrBlank()) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
                                         Text(
-                                            text = ggufProgressText!!,
+                                            text = ggufProgressText ?: "Downloading GGUF model...",
                                             style = MaterialTheme.typography.labelSmall,
-                                            color = ElectricCyan
+                                            color = ElectricCyan,
+                                            modifier = Modifier.weight(1f)
                                         )
+                                        if (isManagingGguf) {
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            OutlinedButton(
+                                                onClick = { viewModel.pauseGgufDownload() },
+                                                modifier = Modifier
+                                                    .height(48.dp)
+                                                    .testTag("pause_gguf_download_button")
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Filled.Pause,
+                                                    contentDescription = "Pause GGUF download",
+                                                    modifier = Modifier.size(18.dp),
+                                                    tint = SaffronGold
+                                                )
+                                                Spacer(modifier = Modifier.width(4.dp))
+                                                Text("Pause")
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -639,6 +665,7 @@ fun SettingsScreen(
                             // Curated Open-Source Presets
                             LocalLlmModelManager.PRESETS.forEach { preset ->
                                 val installed = installedGgufModels.firstOrNull { it.fileName == preset.fileName && it.isValidGguf }
+                                val partial = if (installed == null) partialGgufDownloads[preset.fileName] else null
                                 val isActive = resolvedActiveName == preset.fileName
                                 val recommendedForPhone = (deviceRamGb >= 5.5f && preset.minRamGb >= 6) ||
                                     (deviceRamGb < 5.5f && preset.minRamGb <= 4)
@@ -648,7 +675,11 @@ fun SettingsScreen(
                                     shape = MaterialTheme.shapes.medium,
                                     border = BorderStroke(
                                         width = 1.dp,
-                                        color = if (isActive) EmeraldSuccess.copy(alpha = 0.65f) else ObsidianBorder
+                                        color = when {
+                                            isActive -> EmeraldSuccess.copy(alpha = 0.65f)
+                                            partial != null -> SaffronGold.copy(alpha = 0.55f)
+                                            else -> ObsidianBorder
+                                        }
                                     )
                                 ) {
                                     Column(
@@ -665,7 +696,11 @@ fun SettingsScreen(
                                             Column(modifier = Modifier.weight(1f)) {
                                                 Text(preset.displayName, style = MaterialTheme.typography.titleSmall)
                                                 Text(
-                                                    text = "~${preset.approxSizeMb} MB • Min ${preset.minRamGb}GB RAM",
+                                                    text = if (partial != null) {
+                                                        "Saved ${(partial.progressFraction * 100f).toInt()}% (${WavUtils.formatFileSize(partial.bytesDownloaded)}) • HTTP Range Resume Ready"
+                                                    } else {
+                                                        "~${preset.approxSizeMb} MB • Min ${preset.minRamGb}GB RAM"
+                                                    },
                                                     style = MaterialTheme.typography.labelSmall,
                                                     color = SaffronGold
                                                 )
@@ -674,6 +709,11 @@ fun SettingsScreen(
                                                 StatusPill(
                                                     label = if (isActive) "ACTIVE" else "INSTALLED",
                                                     tone = if (isActive) "SUCCESS" else "ACTIVE"
+                                                )
+                                            } else if (partial != null) {
+                                                StatusPill(
+                                                    label = "PAUSED ${(partial.progressFraction * 100f).toInt()}%",
+                                                    tone = "WARN"
                                                 )
                                             } else if (recommendedForPhone) {
                                                 StatusPill(label = "RECOMMENDED", tone = "ACTIVE")
@@ -686,7 +726,8 @@ fun SettingsScreen(
                                         )
                                         Row(
                                             modifier = Modifier.fillMaxWidth(),
-                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                            verticalAlignment = Alignment.CenterVertically
                                         ) {
                                             if (installed == null) {
                                                 Button(
@@ -697,13 +738,34 @@ fun SettingsScreen(
                                                         .height(48.dp)
                                                         .testTag("download_gguf_${preset.id}"),
                                                     colors = ButtonDefaults.buttonColors(
-                                                        containerColor = ElectricCyan,
+                                                        containerColor = if (partial != null) SaffronGold else ElectricCyan,
                                                         contentColor = ObsidianNight
                                                     )
                                                 ) {
                                                     Icon(Icons.Filled.CloudDownload, contentDescription = null)
                                                     Spacer(modifier = Modifier.width(6.dp))
-                                                    Text("Download (~${preset.approxSizeMb} MB)")
+                                                    Text(
+                                                        if (partial != null) {
+                                                            "Resume (${WavUtils.formatFileSize(partial.bytesDownloaded)} / ${preset.approxSizeMb} MB)"
+                                                        } else {
+                                                            "Download (~${preset.approxSizeMb} MB)"
+                                                        }
+                                                    )
+                                                }
+                                                if (partial != null) {
+                                                    IconButton(
+                                                        onClick = { viewModel.discardPartialGguf(preset.fileName) },
+                                                        enabled = !isManagingGguf,
+                                                        modifier = Modifier
+                                                            .size(48.dp)
+                                                            .testTag("discard_partial_gguf_${preset.id}")
+                                                    ) {
+                                                        Icon(
+                                                            Icons.Filled.DeleteOutline,
+                                                            contentDescription = "Discard partial download ${preset.fileName}",
+                                                            tint = ErrorCrimson
+                                                        )
+                                                    }
                                                 }
                                             } else {
                                                 if (!isActive) {
@@ -972,10 +1034,12 @@ fun SettingsScreen(
                     }
                 }
 
-                // On-Device Free Offline Models Card (~70 MB)
+                // On-Device STT, Vocal-Isolation Pre-Filter & Offline Models Card
                 item {
                     Card(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("settings_on_device_models_card"),
                         colors = CardDefaults.cardColors(containerColor = ObsidianSurface),
                         border = BorderStroke(1.dp, SaffronGold.copy(alpha = 0.45f)),
                         shape = MaterialTheme.shapes.large
@@ -984,7 +1048,62 @@ fun SettingsScreen(
                             modifier = Modifier.padding(16.dp),
                             verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            Text("On-Device Offline AI Models (~70 MB)", style = MaterialTheme.typography.titleMedium)
+                            Text("On-Device STT & Offline AI Models", style = MaterialTheme.typography.titleMedium)
+
+                            Text("Offline Speech Recognition (STT) Engine", style = MaterialTheme.typography.titleSmall)
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                SttEngineMode.all.forEach { sttMode ->
+                                    FilterChip(
+                                        selected = prefs.sttEngineMode == sttMode,
+                                        onClick = { viewModel.setSttEngineMode(sttMode) },
+                                        label = { Text(SttEngineMode.displayLabel(sttMode)) },
+                                        colors = FilterChipDefaults.filterChipColors(
+                                            selectedContainerColor = SaffronContainer,
+                                            selectedLabelColor = SaffronGold
+                                        ),
+                                        modifier = Modifier.testTag("settings_stt_engine_$sttMode")
+                                    )
+                                }
+                            }
+                            Text(
+                                text = when (prefs.sttEngineMode) {
+                                    SttEngineMode.WHISPER_TINY_EN ->
+                                        "Whisper Tiny EN (~32 MB): understands whispered/noisy movie dialogue and punctuation far better than Vosk (ARM64 CPUs; falls back to Vosk if needed)."
+                                    SttEngineMode.WHISPER_BASE_EN ->
+                                        "Whisper Base EN (~60 MB): highest offline movie-dialogue accuracy for accents, fast conversations & soft speech (slightly slower on CPU)."
+                                    else ->
+                                        "Vosk Fast EN (~40 MB): ultra-fast lightweight speech recognition (~3-5x faster CPU inference; works best with clean audio or Vocal Isolation enabled)."
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text("Vocal-Isolation Pre-Filter Before STT", style = MaterialTheme.typography.bodyMedium)
+                                    Text(
+                                        "Extracts stereo center vocals & applies 160–3600 Hz bandpass on STT stream (original BGM untouched)",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Switch(
+                                    checked = prefs.sttVocalIsolationEnabled,
+                                    onCheckedChange = { viewModel.setSttVocalIsolationEnabled(it) },
+                                    colors = SwitchDefaults.colors(checkedThumbColor = SaffronGold),
+                                    modifier = Modifier.testTag("settings_vocal_isolation_switch")
+                                )
+                            }
+
+                            HorizontalDivider(color = ObsidianBorder)
+
                             val st = modelsStatus
                             if (st != null) {
                                 Row(
@@ -996,6 +1115,28 @@ fun SettingsScreen(
                                     StatusPill(
                                         label = if (st.voskDownloaded) "READY (${WavUtils.formatFileSize(st.voskSizeBytes)})" else "MISSING",
                                         tone = if (st.voskDownloaded) "SUCCESS" else "WARN"
+                                    )
+                                }
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("Whisper Tiny EN (~32 MB)", style = MaterialTheme.typography.bodySmall)
+                                    StatusPill(
+                                        label = if (st.whisperTinyDownloaded) "READY (${WavUtils.formatFileSize(st.whisperTinySizeBytes)})" else "MISSING",
+                                        tone = if (st.whisperTinyDownloaded) "SUCCESS" else "NEUTRAL"
+                                    )
+                                }
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("Whisper Base EN (~60 MB)", style = MaterialTheme.typography.bodySmall)
+                                    StatusPill(
+                                        label = if (st.whisperBaseDownloaded) "READY (${WavUtils.formatFileSize(st.whisperBaseSizeBytes)})" else "MISSING",
+                                        tone = if (st.whisperBaseDownloaded) "SUCCESS" else "NEUTRAL"
                                     )
                                 }
                                 Row(
@@ -1057,7 +1198,12 @@ fun SettingsScreen(
                                 }
                                 OutlinedButton(
                                     onClick = { viewModel.deleteOnDeviceModels() },
-                                    enabled = !isManagingModels && (modelsStatus?.voskDownloaded == true || modelsStatus?.mlKitHindiDownloaded == true),
+                                    enabled = !isManagingModels && (
+                                        modelsStatus?.voskDownloaded == true ||
+                                            modelsStatus?.whisperTinyDownloaded == true ||
+                                            modelsStatus?.whisperBaseDownloaded == true ||
+                                            modelsStatus?.mlKitHindiDownloaded == true
+                                        ),
                                     modifier = Modifier.height(48.dp)
                                 ) {
                                     Icon(Icons.Filled.DeleteOutline, contentDescription = null)

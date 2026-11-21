@@ -10,8 +10,12 @@ import com.example.ai.OnDeviceModelManager.awaitTask
 import com.example.data.local.DialogueSegmentEntity
 import com.example.data.local.DialogueStyle
 import com.example.data.local.SpeakerEntity
+import com.example.data.local.SttEngineMode
 import com.example.media.AudioChunkExtractor
 import com.example.media.WavUtils
+import dev.ffmpegkit.whisper.Whisper
+import dev.ffmpegkit.whisper.WhisperConfig
+import dev.ffmpegkit.whisper.WhisperModel
 import com.google.mlkit.common.model.RemoteModelManager
 import com.google.mlkit.nl.translate.TranslateLanguage
 import com.google.mlkit.nl.translate.TranslateRemoteModel
@@ -46,22 +50,40 @@ private const val TAG = "OnDeviceDubbingEngine"
 class OnDeviceDubbingEngine(private val context: Context) {
 
     private var voskModel: Model? = null
+    private var whisperModel: WhisperModel? = null
+    private var whisperModelPath: String? = null
     private var mlKitTranslator: Translator? = null
     private var ttsEngine: TextToSpeech? = null
     private var cachedHindiVoices: List<AndroidTtsVoice> = emptyList()
     private val ttsMutex = Mutex()
     private val localGgufTranslator = LocalGgufTranslator()
 
-    suspend fun ensureReady(onStatus: (String) -> Unit) {
-        OnDeviceModelManager.ensureAllModelsReady(context, onStatus)
+    suspend fun ensureReady(
+        sttEngineMode: String = SttEngineMode.VOSK_FAST,
+        skipSttDownload: Boolean = false,
+        onStatus: (String) -> Unit
+    ) {
+        if (!skipSttDownload) {
+            OnDeviceModelManager.ensureSttModelReady(context, sttEngineMode, onStatus)
+        }
+        OnDeviceModelManager.ensureMlKitHindiModel(onStatus)
+        val (ttsReady, _, ttsNote) = OnDeviceModelManager.checkAndroidHindiTts(context)
+        if (!ttsReady) {
+            throw IllegalStateException(
+                "Android Hindi Text-to-Speech voice data is not ready on this phone ($ttsNote). " +
+                    "Tap 'Install Hindi TTS Voice' or enable Google Speech Services in Android Settings."
+            )
+        }
     }
 
     suspend fun ensureReadyForLocalLlm(
         preferredGgufFileName: String?,
+        sttEngineMode: String = SttEngineMode.VOSK_FAST,
+        skipSttDownload: Boolean = false,
         onStatus: (String) -> Unit
     ): File {
-        if (!OnDeviceModelManager.isVoskModelReady(context)) {
-            OnDeviceModelManager.downloadAndExtractVoskModel(context, onStatus)
+        if (!skipSttDownload) {
+            OnDeviceModelManager.ensureSttModelReady(context, sttEngineMode, onStatus)
         }
         // Best-effort prepare ML Kit EN->HI (~30MB) so Hybrid Turbo & fallback are always ready when online
         runCatching { OnDeviceModelManager.ensureMlKitHindiModel(onStatus) }
@@ -179,12 +201,89 @@ class OnDeviceDubbingEngine(private val context: Context) {
     }
 
     /**
-     * Transcribes 16kHz Mono PCM WAV chunk entirely on-device using Vosk + autocorrelation pitch analysis.
+     * Transcribes 16kHz Mono PCM WAV chunk entirely on-device using either Whisper (Tiny/Base EN)
+     * or Vosk, followed by autocorrelation pitch speaker analysis.
      */
     suspend fun transcribeAudioChunk(
         sttWavFile: File,
-        chunkDurationMs: Long
+        chunkDurationMs: Long,
+        sttEngineMode: String = SttEngineMode.VOSK_FAST
     ): ChunkTranscriptionResult = withContext(Dispatchers.IO) {
+        if (sttEngineMode == SttEngineMode.WHISPER_TINY_EN || sttEngineMode == SttEngineMode.WHISPER_BASE_EN) {
+            try {
+                return@withContext transcribeWithWhisper(sttWavFile, chunkDurationMs, sttEngineMode)
+            } catch (t: UnsatisfiedLinkError) {
+                Log.w(TAG, "Whisper native lib unavailable on this CPU ABI; falling back to Vosk", t)
+                if (!OnDeviceModelManager.isVoskModelReady(context)) {
+                    OnDeviceModelManager.downloadAndExtractVoskModel(context) {}
+                }
+            }
+        }
+        transcribeWithVosk(sttWavFile, chunkDurationMs)
+    }
+
+    /**
+     * Uses exact external `.srt` / `.vtt` subtitle cues over [sttWavFile] to skip speech recognition
+     * while preserving DSP Male/Female pitch diarization, emotion energy, and VOCAL_SFX/BGM intervals.
+     */
+    fun transcribeWithSubtitleCues(
+        sttWavFile: File,
+        phrases: List<OnDeviceSpeakerAnalyzer.SpeechRawPhrase>,
+        chunkDurationMs: Long
+    ): ChunkTranscriptionResult {
+        return OnDeviceSpeakerAnalyzer.analyzeSpeakersAndBuildTimeline(
+            sttWavFile = sttWavFile,
+            phrases = phrases,
+            chunkDurationMs = chunkDurationMs,
+            mergeChoppyPhrases = false
+        )
+    }
+
+    private suspend fun transcribeWithWhisper(
+        sttWavFile: File,
+        chunkDurationMs: Long,
+        sttEngineMode: String
+    ): ChunkTranscriptionResult {
+        val model = getOrLoadWhisperModel(sttEngineMode)
+        val cpuThreads = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
+        val cfg = WhisperConfig(
+            language = "en",
+            translate = false,
+            threads = cpuThreads,
+            maxSegmentLength = 0,
+            printTimestamps = true
+        )
+        val result = Whisper.transcribe(model, sttWavFile.absolutePath, cfg)
+        val rawPhrases = result.segments.mapNotNull { seg ->
+            val cleaned = cleanWhisperSegmentText(seg.text) ?: return@mapNotNull null
+            val s = seg.startMs.coerceIn(0L, chunkDurationMs)
+            val e = seg.endMs.coerceIn(s + 250L, chunkDurationMs)
+            OnDeviceSpeakerAnalyzer.SpeechRawPhrase(
+                startOffsetMs = s,
+                endOffsetMs = e,
+                text = cleaned
+            )
+        }
+        return OnDeviceSpeakerAnalyzer.analyzeSpeakersAndBuildTimeline(
+            sttWavFile = sttWavFile,
+            phrases = rawPhrases,
+            chunkDurationMs = chunkDurationMs,
+            mergeChoppyPhrases = true
+        )
+    }
+
+    private fun cleanWhisperSegmentText(raw: String): String? {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty()) return null
+        val lower = trimmed.lowercase(Locale.US)
+        if (lower == "[blank_audio]" || lower == "(blank audio)" || lower == "[silence]") return null
+        return trimmed
+    }
+
+    private fun transcribeWithVosk(
+        sttWavFile: File,
+        chunkDurationMs: Long
+    ): ChunkTranscriptionResult {
         val model = getOrLoadVoskModel()
         val header = WavUtils.readHeader(sttWavFile)
         val sampleRate = header.sampleRate.toFloat().coerceAtLeast(16000.0f)
@@ -212,10 +311,11 @@ class OnDeviceDubbingEngine(private val context: Context) {
             runCatching { recognizer.close() }
         }
 
-        OnDeviceSpeakerAnalyzer.analyzeSpeakersAndBuildTimeline(
+        return OnDeviceSpeakerAnalyzer.analyzeSpeakersAndBuildTimeline(
             sttWavFile = sttWavFile,
             phrases = rawPhrases,
-            chunkDurationMs = chunkDurationMs
+            chunkDurationMs = chunkDurationMs,
+            mergeChoppyPhrases = true
         )
     }
 
@@ -277,9 +377,10 @@ class OnDeviceDubbingEngine(private val context: Context) {
         hybridTurbo: Boolean = true,
         onLineTranslated: (suspend (line: TranslatedLine, index: Int, total: Int) -> Unit)? = null
     ): List<TranslatedLine> = withContext(Dispatchers.IO) {
-        // Free Vosk native buffers before mapping the GGUF weights on 4-6GB RAM phones
+        // Free Vosk & Whisper native buffers before mapping GGUF weights on 4-6GB RAM phones
         runCatching { voskModel?.close() }
         voskModel = null
+        releaseWhisper()
 
         val dictConfig = SlangDictionaryManager.loadConfig(context)
         val mlKitReady = runCatching {
@@ -390,11 +491,37 @@ class OnDeviceDubbingEngine(private val context: Context) {
     fun release() {
         runCatching { voskModel?.close() }
         voskModel = null
+        releaseWhisper()
         runCatching { mlKitTranslator?.close() }
         mlKitTranslator = null
         runCatching { ttsEngine?.shutdown() }
         ttsEngine = null
         localGgufTranslator.releaseBlocking()
+    }
+
+    private fun releaseWhisper() {
+        val wm = whisperModel
+        whisperModel = null
+        whisperModelPath = null
+        if (wm != null) {
+            runCatching { Whisper.releaseModel(wm) }
+        }
+    }
+
+    private suspend fun getOrLoadWhisperModel(sttEngineMode: String): WhisperModel {
+        val file = OnDeviceModelManager.whisperModelFile(context, sttEngineMode)
+        require(OnDeviceModelManager.isWhisperModelReady(context, sttEngineMode)) {
+            "Whisper offline speech model not downloaded yet."
+        }
+        val existing = whisperModel
+        if (existing != null && whisperModelPath == file.absolutePath && existing.isValid) {
+            return existing
+        }
+        releaseWhisper()
+        val loaded = Whisper.loadModel(context, file.absolutePath)
+        whisperModel = loaded
+        whisperModelPath = file.absolutePath
+        return loaded
     }
 
     @Synchronized

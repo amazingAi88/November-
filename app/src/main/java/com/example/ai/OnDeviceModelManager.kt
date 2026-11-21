@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.provider.Settings
 import android.speech.tts.TextToSpeech
+import com.example.data.local.SttEngineMode
 import com.google.android.gms.tasks.Task
 import com.google.mlkit.common.model.DownloadConditions
 import com.google.mlkit.common.model.RemoteModelManager
@@ -18,8 +19,6 @@ import kotlinx.coroutines.withTimeout
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.FileOutputStream
-import java.net.HttpURLConnection
-import java.net.URL
 import java.util.Locale
 import java.util.zip.ZipInputStream
 import kotlin.coroutines.resume
@@ -28,6 +27,10 @@ import kotlin.coroutines.resumeWithException
 data class OnDeviceModelsStatus(
     val voskDownloaded: Boolean,
     val voskSizeBytes: Long,
+    val whisperTinyDownloaded: Boolean,
+    val whisperTinySizeBytes: Long,
+    val whisperBaseDownloaded: Boolean,
+    val whisperBaseSizeBytes: Long,
     val mlKitHindiDownloaded: Boolean,
     val androidHindiTtsReady: Boolean,
     val ttsVoicesCount: Int,
@@ -35,8 +38,8 @@ data class OnDeviceModelsStatus(
 )
 
 /**
- * Manages one-time free downloads of on-device models (Vosk English Small ~40MB + ML Kit EN->HI ~30MB)
- * and inspects Android built-in Hindi TextToSpeech availability. Zero paid API keys required.
+ * Manages one-time free downloads of on-device models (Vosk English Small ~40MB, Whisper Tiny/Base EN,
+ * and ML Kit EN->HI ~30MB) and inspects Android built-in Hindi TextToSpeech availability.
  */
 object OnDeviceModelManager {
 
@@ -45,11 +48,36 @@ object OnDeviceModelManager {
         "https://alphacephei.com/kaldi/models/vosk-model-small-en-us-0.15.zip"
     )
 
+    private const val WHISPER_TINY_URL =
+        "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en-q5_1.bin"
+    private const val WHISPER_BASE_URL =
+        "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en-q5_1.bin"
+    private const val WHISPER_TINY_FILE = "ggml-tiny.en-q5_1.bin"
+    private const val WHISPER_BASE_FILE = "ggml-base.en-q5_1.bin"
+
     private const val VOSK_DIR_NAME = "vosk-en-us-small"
+    private const val WHISPER_DIR_NAME = "whisper"
     private const val READY_MARKER = ".ready"
 
     fun voskModelDir(context: Context): File =
         File(File(context.filesDir, "models"), VOSK_DIR_NAME)
+
+    fun whisperModelsDir(context: Context): File =
+        File(File(context.filesDir, "models"), WHISPER_DIR_NAME).apply { mkdirs() }
+
+    fun whisperModelFile(context: Context, sttEngineMode: String): File {
+        val fileName = when (sttEngineMode) {
+            SttEngineMode.WHISPER_BASE_EN -> WHISPER_BASE_FILE
+            else -> WHISPER_TINY_FILE
+        }
+        return File(whisperModelsDir(context), fileName)
+    }
+
+    fun isWhisperModelReady(context: Context, sttEngineMode: String): Boolean {
+        val f = whisperModelFile(context, sttEngineMode)
+        val minBytes = if (sttEngineMode == SttEngineMode.WHISPER_BASE_EN) 25L * 1024L * 1024L else 15L * 1024L * 1024L
+        return f.exists() && f.isFile && f.length() >= minBytes
+    }
 
     fun isVoskModelReady(context: Context): Boolean {
         val dir = voskModelDir(context)
@@ -68,6 +96,10 @@ object OnDeviceModelManager {
     suspend fun inspectStatus(context: Context): OnDeviceModelsStatus = withContext(Dispatchers.IO) {
         val voskReady = isVoskModelReady(context)
         val voskBytes = getVoskModelSizeBytes(context)
+        val wTinyReady = isWhisperModelReady(context, SttEngineMode.WHISPER_TINY_EN)
+        val wTinyBytes = if (wTinyReady) whisperModelFile(context, SttEngineMode.WHISPER_TINY_EN).length() else 0L
+        val wBaseReady = isWhisperModelReady(context, SttEngineMode.WHISPER_BASE_EN)
+        val wBaseBytes = if (wBaseReady) whisperModelFile(context, SttEngineMode.WHISPER_BASE_EN).length() else 0L
 
         val mlKitReady = try {
             val hindiModel = TranslateRemoteModel.Builder(TranslateLanguage.HINDI).build()
@@ -81,6 +113,10 @@ object OnDeviceModelManager {
         OnDeviceModelsStatus(
             voskDownloaded = voskReady,
             voskSizeBytes = voskBytes,
+            whisperTinyDownloaded = wTinyReady,
+            whisperTinySizeBytes = wTinyBytes,
+            whisperBaseDownloaded = wBaseReady,
+            whisperBaseSizeBytes = wBaseBytes,
             mlKitHindiDownloaded = mlKitReady,
             androidHindiTtsReady = ttsReady,
             ttsVoicesCount = voicesCount,
@@ -88,8 +124,16 @@ object OnDeviceModelManager {
         )
     }
 
-    suspend fun isOfflineModelsDownloaded(context: Context): Boolean = withContext(Dispatchers.IO) {
-        if (!isVoskModelReady(context)) return@withContext false
+    suspend fun isOfflineModelsDownloaded(
+        context: Context,
+        sttEngineMode: String = SttEngineMode.VOSK_FAST
+    ): Boolean = withContext(Dispatchers.IO) {
+        val sttOk = when (sttEngineMode) {
+            SttEngineMode.WHISPER_TINY_EN,
+            SttEngineMode.WHISPER_BASE_EN -> isWhisperModelReady(context, sttEngineMode)
+            else -> isVoskModelReady(context)
+        }
+        if (!sttOk) return@withContext false
         try {
             val hindiModel = TranslateRemoteModel.Builder(TranslateLanguage.HINDI).build()
             RemoteModelManager.getInstance().isModelDownloaded(hindiModel).awaitTask()
@@ -118,11 +162,10 @@ object OnDeviceModelManager {
 
     suspend fun ensureAllModelsReady(
         context: Context,
+        sttEngineMode: String = SttEngineMode.VOSK_FAST,
         onStatus: (String) -> Unit
     ) {
-        if (!isVoskModelReady(context)) {
-            downloadAndExtractVoskModel(context, onStatus)
-        }
+        ensureSttModelReady(context, sttEngineMode, onStatus)
         ensureMlKitHindiModel(onStatus)
         val (ttsReady, _, ttsNote) = checkAndroidHindiTts(context)
         if (!ttsReady) {
@@ -130,6 +173,56 @@ object OnDeviceModelManager {
                 "Android Hindi Text-to-Speech voice data is not ready on this phone ($ttsNote). " +
                     "Tap 'Install Hindi TTS Voice' or enable Google Speech Services in Android Settings."
             )
+        }
+    }
+
+    suspend fun ensureSttModelReady(
+        context: Context,
+        sttEngineMode: String,
+        onStatus: (String) -> Unit
+    ) {
+        when (sttEngineMode) {
+            SttEngineMode.WHISPER_TINY_EN,
+            SttEngineMode.WHISPER_BASE_EN -> {
+                if (!isWhisperModelReady(context, sttEngineMode)) {
+                    downloadWhisperModel(context, sttEngineMode, onStatus)
+                }
+            }
+            else -> {
+                if (!isVoskModelReady(context)) {
+                    downloadAndExtractVoskModel(context, onStatus)
+                }
+            }
+        }
+    }
+
+    suspend fun downloadWhisperModel(
+        context: Context,
+        sttEngineMode: String,
+        onStatus: (String) -> Unit
+    ): File = withContext(Dispatchers.IO) {
+        val destFile = whisperModelFile(context, sttEngineMode)
+        if (isWhisperModelReady(context, sttEngineMode)) return@withContext destFile
+
+        val isBase = sttEngineMode == SttEngineMode.WHISPER_BASE_EN
+        val url = if (isBase) WHISPER_BASE_URL else WHISPER_TINY_URL
+        val approxBytes = if (isBase) 60L * 1024L * 1024L else 32L * 1024L * 1024L
+        val label = if (isBase) "Whisper Base EN (~60 MB)" else "Whisper Tiny EN (~32 MB)"
+        val partFile = File(destFile.parentFile, "${destFile.name}.part")
+
+        onStatus("Downloading $label...")
+        ResumableHttpDownloader.downloadToFile(
+            url = url,
+            partFile = partFile,
+            destFile = destFile,
+            fallbackApproxBytes = approxBytes,
+            reportIntervalBytes = 512L * 1024L,
+            validateComplete = { f -> f.length() >= (approxBytes / 2L) }
+        ) { doneBytes, totalBytes ->
+            val dlMb = doneBytes / (1024f * 1024f)
+            val totMb = totalBytes.coerceAtLeast(approxBytes) / (1024f * 1024f)
+            val pct = ((doneBytes.toFloat() / totalBytes.coerceAtLeast(approxBytes)) * 100f).toInt().coerceIn(0, 100)
+            onStatus(String.format(Locale.US, "Downloading %s: %.0f / %.0f MB (%d%%)", label, dlMb, totMb, pct))
         }
     }
 
@@ -143,7 +236,8 @@ object OnDeviceModelManager {
         targetDir.deleteRecursively()
         targetDir.mkdirs()
 
-        val zipTemp = File(context.cacheDir, "vosk_en_small_tmp.zip")
+        val zipPart = File(context.cacheDir, "vosk_en_small_tmp.zip.part")
+        val zipFinal = File(context.cacheDir, "vosk_en_small_tmp.zip")
         var lastError: Exception? = null
         var downloadedOk = false
 
@@ -151,7 +245,15 @@ object OnDeviceModelManager {
             for (urlStr in VOSK_EN_URLS) {
                 try {
                     onStatus("Downloading Vosk Offline English Model (~40 MB)...")
-                    downloadFileWithProgress(urlStr, zipTemp) { doneMb, totalMb ->
+                    ResumableHttpDownloader.downloadToFile(
+                        url = urlStr,
+                        partFile = zipPart,
+                        destFile = zipFinal,
+                        fallbackApproxBytes = 40L * 1024L * 1024L,
+                        reportIntervalBytes = 512L * 1024L
+                    ) { doneBytes, totalBytes ->
+                        val doneMb = doneBytes / (1024f * 1024f)
+                        val totalMb = totalBytes / (1024f * 1024f)
                         if (totalMb > 0f) {
                             onStatus("Downloading Vosk English Model: ${doneMb.toInt()} / ${totalMb.toInt()} MB")
                         } else {
@@ -162,7 +264,6 @@ object OnDeviceModelManager {
                     break
                 } catch (e: Exception) {
                     lastError = e
-                    zipTemp.delete()
                 }
             }
 
@@ -174,10 +275,14 @@ object OnDeviceModelManager {
             }
 
             onStatus("Extracting offline English speech model...")
-            extractVoskZip(zipTemp, targetDir)
+            extractVoskZip(zipFinal, targetDir)
             File(targetDir, READY_MARKER).writeText("ok")
+            zipFinal.delete()
         } finally {
-            zipTemp.delete()
+            if (isVoskModelReady(context)) {
+                zipPart.delete()
+                zipFinal.delete()
+            }
         }
     }
 
@@ -204,11 +309,16 @@ object OnDeviceModelManager {
     suspend fun deleteOnDeviceModels(context: Context): Long = withContext(Dispatchers.IO) {
         val voskBytes = getVoskModelSizeBytes(context)
         voskModelDir(context).deleteRecursively()
+        val whisperDir = whisperModelsDir(context)
+        val whisperBytes = if (whisperDir.exists()) {
+            whisperDir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+        } else 0L
+        whisperDir.deleteRecursively()
         runCatching {
             val hindiModel = TranslateRemoteModel.Builder(TranslateLanguage.HINDI).build()
             RemoteModelManager.getInstance().deleteDownloadedModel(hindiModel).awaitTask()
         }
-        voskBytes
+        voskBytes + whisperBytes
     }
 
     suspend fun checkAndroidHindiTts(context: Context): Triple<Boolean, Int, String> {
@@ -252,61 +362,6 @@ object OnDeviceModelManager {
             }
         } catch (_: Exception) {
             Triple(false, 0, "Timed out checking Android TTS")
-        }
-    }
-
-    private fun downloadFileWithProgress(
-        urlStr: String,
-        destFile: File,
-        onProgressMb: (Float, Float) -> Unit
-    ) {
-        var currentUrl = urlStr
-        var redirects = 0
-        var conn: HttpURLConnection? = null
-        while (redirects < 5) {
-            val c = (URL(currentUrl).openConnection() as HttpURLConnection).apply {
-                connectTimeout = 20_000
-                readTimeout = 30_000
-                instanceFollowRedirects = true
-            }
-            val code = c.responseCode
-            if (code in 300..399) {
-                val loc = c.getHeaderField("Location")
-                c.disconnect()
-                if (loc.isNullOrBlank()) throw IllegalStateException("Redirect missing Location")
-                currentUrl = loc
-                redirects++
-            } else {
-                conn = c
-                break
-            }
-        }
-        val activeConn = conn ?: throw IllegalStateException("Too many redirects")
-        try {
-            if (activeConn.responseCode !in 200..299) {
-                throw IllegalStateException("HTTP ${activeConn.responseCode} downloading model")
-            }
-            val totalBytes = activeConn.contentLengthLong.coerceAtLeast(0L)
-            val totalMb = totalBytes / (1024f * 1024f)
-            var downloaded = 0L
-            var lastReported = 0L
-            val buf = ByteArray(16 * 1024)
-            BufferedInputStream(activeConn.inputStream).use { input ->
-                FileOutputStream(destFile).use { output ->
-                    while (true) {
-                        val read = input.read(buf)
-                        if (read < 0) break
-                        output.write(buf, 0, read)
-                        downloaded += read
-                        if (downloaded - lastReported >= 1024 * 1024) {
-                            lastReported = downloaded
-                            onProgressMb(downloaded / (1024f * 1024f), totalMb)
-                        }
-                    }
-                }
-            }
-        } finally {
-            activeConn.disconnect()
         }
     }
 

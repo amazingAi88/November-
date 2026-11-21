@@ -25,6 +25,7 @@ import com.example.data.local.ProcessingStage
 import com.example.data.local.ProjectStatus
 import com.example.data.local.SegmentStatus
 import com.example.data.local.SpeakerEntity
+import com.example.data.local.SttEngineMode
 import com.example.media.AudioChunkExtractor
 import com.example.media.AudioMixer
 import com.example.media.AudioPlaybackState
@@ -99,6 +100,14 @@ class ProjectStudioViewModel(
     val dubbingSpeedMode: StateFlow<String> = preferencesRepository.preferencesFlow
         .map { it.dubbingSpeedMode }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), DubbingSpeedMode.HYBRID_TURBO)
+
+    val sttEngineMode: StateFlow<String> = preferencesRepository.preferencesFlow
+        .map { it.sttEngineMode }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), SttEngineMode.VOSK_FAST)
+
+    val sttVocalIsolationEnabled: StateFlow<Boolean> = preferencesRepository.preferencesFlow
+        .map { it.sttVocalIsolationEnabled }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
 
     val playbackState: StateFlow<AudioPlaybackState> = previewPlayer.state
 
@@ -186,6 +195,36 @@ class ProjectStudioViewModel(
     fun updateDubbingSpeedMode(mode: String) {
         viewModelScope.launch {
             preferencesRepository.setDubbingSpeedMode(mode)
+        }
+    }
+
+    fun updateSttEngineMode(mode: String) {
+        viewModelScope.launch {
+            preferencesRepository.setSttEngineMode(mode)
+        }
+    }
+
+    fun updateSttVocalIsolationEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            preferencesRepository.setSttVocalIsolationEnabled(enabled)
+        }
+    }
+
+    fun attachSubtitleFile(uri: Uri) {
+        viewModelScope.launch {
+            try {
+                val (name, cueCount) = repository.saveSubtitleFromUri(projectId, uri)
+                _statusBanner.value = "Attached $name ($cueCount subtitle cues) — STT bypassed for exact dialogue."
+            } catch (e: Exception) {
+                _statusBanner.value = e.localizedMessage ?: "Failed to load .srt / .vtt subtitle file."
+            }
+        }
+    }
+
+    fun clearSubtitleFile() {
+        viewModelScope.launch {
+            repository.clearProjectSubtitle(projectId)
+            _statusBanner.value = "Removed subtitle file — speech recognition will transcribe dialogue."
         }
     }
 
@@ -529,18 +568,48 @@ class ProjectStudioViewModel(
 
     fun stopAudioPreview() = previewPlayer.stop()
 
+    private suspend fun isOfflinePipelineReady(
+        app: Application,
+        proj: MovieProjectEntity?,
+        sttMode: String,
+        preferredGguf: String
+    ): Boolean {
+        if (proj == null) return false
+        val hasSubtitle = !proj.subtitlePath.isNullOrBlank() && File(proj.subtitlePath).exists()
+        val sttReady = hasSubtitle || when (sttMode) {
+            SttEngineMode.WHISPER_TINY_EN,
+            SttEngineMode.WHISPER_BASE_EN -> OnDeviceModelManager.isWhisperModelReady(app, sttMode)
+            else -> OnDeviceModelManager.isVoskModelReady(app)
+        }
+        if (!sttReady) return false
+
+        return when (proj.engineMode) {
+            EngineMode.ON_DEVICE_FREE -> {
+                if (hasSubtitle) {
+                    OnDeviceModelManager.inspectStatus(app).mlKitHindiDownloaded
+                } else {
+                    OnDeviceModelManager.isOfflineModelsDownloaded(app, sttMode)
+                }
+            }
+            EngineMode.ON_DEVICE_LLM -> withContext(Dispatchers.IO) {
+                LocalLlmModelManager.hasReadyModel(app, preferredGguf)
+            }
+            else -> false
+        }
+    }
+
     // --- Processing Controls ---
     fun startOrResumeDubbing() {
         viewModelScope.launch {
             val proj = repository.getProject(projectId) ?: return@launch
             val app = getApplication<Application>()
-            val preferredGguf = preferencesRepository.preferencesFlow.first().activeGgufModelFileName
-            val needsNetwork = when (proj.engineMode) {
-                EngineMode.ON_DEVICE_FREE -> !OnDeviceModelManager.isOfflineModelsDownloaded(app)
-                EngineMode.ON_DEVICE_LLM -> !OnDeviceModelManager.isVoskModelReady(app) ||
-                    !withContext(Dispatchers.IO) { LocalLlmModelManager.hasReadyModel(app, preferredGguf) }
-                else -> true
-            }
+            val prefs = preferencesRepository.preferencesFlow.first()
+            val needsNetwork = !isOfflinePipelineReady(
+                app = app,
+                proj = proj,
+                sttMode = prefs.sttEngineMode,
+                preferredGguf = prefs.activeGgufModelFileName
+            )
             repository.updateProjectProgress(
                 projectId = projectId,
                 status = ProjectStatus.PROCESSING,
@@ -590,13 +659,13 @@ class ProjectStudioViewModel(
         viewModelScope.launch {
             val proj = repository.getProject(projectId)
             val app = getApplication<Application>()
-            val preferredGguf = preferencesRepository.preferencesFlow.first().activeGgufModelFileName
-            val needsNetwork = when (proj?.engineMode) {
-                EngineMode.ON_DEVICE_FREE -> !OnDeviceModelManager.isOfflineModelsDownloaded(app)
-                EngineMode.ON_DEVICE_LLM -> !OnDeviceModelManager.isVoskModelReady(app) ||
-                    !withContext(Dispatchers.IO) { LocalLlmModelManager.hasReadyModel(app, preferredGguf) }
-                else -> true
-            }
+            val prefs = preferencesRepository.preferencesFlow.first()
+            val needsNetwork = !isOfflinePipelineReady(
+                app = app,
+                proj = proj,
+                sttMode = prefs.sttEngineMode,
+                preferredGguf = prefs.activeGgufModelFileName
+            )
             repository.updateProjectProgress(
                 projectId = projectId,
                 status = ProjectStatus.PROCESSING,

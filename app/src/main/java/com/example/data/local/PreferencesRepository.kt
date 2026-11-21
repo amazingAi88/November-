@@ -54,7 +54,9 @@ data class StudioPreferences(
     val mediaAsyncCodecQueueing: Boolean = true,
     val mediaHighOperatingRate: Boolean = true,
     val mediaAllowCodecFallback: Boolean = true,
-    val mediaTransformerTimeoutSec: Int = 30
+    val mediaTransformerTimeoutSec: Int = 30,
+    val sttEngineMode: String = SttEngineMode.VOSK_FAST,
+    val sttVocalIsolationEnabled: Boolean = true
 )
 
 class PreferencesRepository(private val context: Context) {
@@ -73,6 +75,8 @@ class PreferencesRepository(private val context: Context) {
         val MEDIA_HIGH_OPERATING_RATE = booleanPreferencesKey("media_high_operating_rate")
         val MEDIA_ALLOW_CODEC_FALLBACK = booleanPreferencesKey("media_allow_codec_fallback")
         val MEDIA_TRANSFORMER_TIMEOUT_SEC = intPreferencesKey("media_transformer_timeout_sec")
+        val STT_ENGINE_MODE = stringPreferencesKey("stt_engine_mode")
+        val STT_VOCAL_ISOLATION = booleanPreferencesKey("stt_vocal_isolation")
     }
 
     val preferencesFlow: Flow<StudioPreferences> = context.dataStore.data.map { prefs ->
@@ -90,7 +94,9 @@ class PreferencesRepository(private val context: Context) {
             mediaAsyncCodecQueueing = prefs[Keys.MEDIA_ASYNC_CODEC_QUEUEING] ?: true,
             mediaHighOperatingRate = prefs[Keys.MEDIA_HIGH_OPERATING_RATE] ?: true,
             mediaAllowCodecFallback = prefs[Keys.MEDIA_ALLOW_CODEC_FALLBACK] ?: true,
-            mediaTransformerTimeoutSec = prefs[Keys.MEDIA_TRANSFORMER_TIMEOUT_SEC] ?: 30
+            mediaTransformerTimeoutSec = prefs[Keys.MEDIA_TRANSFORMER_TIMEOUT_SEC] ?: 30,
+            sttEngineMode = prefs[Keys.STT_ENGINE_MODE] ?: SttEngineMode.VOSK_FAST,
+            sttVocalIsolationEnabled = prefs[Keys.STT_VOCAL_ISOLATION] ?: true
         )
     }
 
@@ -154,5 +160,14 @@ class PreferencesRepository(private val context: Context) {
             else -> seconds.coerceIn(10, 300)
         }
         context.dataStore.edit { it[Keys.MEDIA_TRANSFORMER_TIMEOUT_SEC] = normalized }
+    }
+
+    suspend fun setSttEngineMode(mode: String) {
+        val valid = if (mode in SttEngineMode.all) mode else SttEngineMode.VOSK_FAST
+        context.dataStore.edit { it[Keys.STT_ENGINE_MODE] = valid }
+    }
+
+    suspend fun setSttVocalIsolationEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.STT_VOCAL_ISOLATION] = enabled }
     }
 }

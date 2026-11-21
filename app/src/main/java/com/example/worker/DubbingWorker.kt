@@ -33,6 +33,8 @@ import com.example.data.local.SpeakerEntity
 import com.example.media.AudioChunkExtractor
 import com.example.media.AudioMixer
 import com.example.media.AudioSeparator
+import com.example.media.SrtSubtitleParser
+import com.example.media.SubtitleCue
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -162,6 +164,16 @@ class DubbingWorker(
         val useOnDevice = project.engineMode == EngineMode.ON_DEVICE_FREE || useLocalLlm
         val studioPrefs = PreferencesRepository(applicationContext).preferencesFlow.first()
         val hybridTurbo = studioPrefs.dubbingSpeedMode == DubbingSpeedMode.HYBRID_TURBO
+        val sttEngineMode = studioPrefs.sttEngineMode
+        val vocalIsolationEnabled = studioPrefs.sttVocalIsolationEnabled
+
+        val parsedSubtitleCues: List<SubtitleCue> = project.subtitlePath
+            ?.let { path -> File(path) }
+            ?.takeIf { it.exists() && it.isFile }
+            ?.let { subFile -> runCatching { SrtSubtitleParser.parse(subFile.readText()) }.getOrNull() }
+            ?: emptyList()
+        val hasSubtitleFile = parsedSubtitleCues.isNotEmpty()
+
         var activeGgufFile: File? = null
         if (useOnDevice) {
             var lastReported = ""
@@ -192,9 +204,18 @@ class DubbingWorker(
                 }
             }
             if (useLocalLlm) {
-                activeGgufFile = onDeviceEngine.ensureReadyForLocalLlm(studioPrefs.activeGgufModelFileName, reportStatus)
+                activeGgufFile = onDeviceEngine.ensureReadyForLocalLlm(
+                    preferredGgufFileName = studioPrefs.activeGgufModelFileName,
+                    sttEngineMode = sttEngineMode,
+                    skipSttDownload = hasSubtitleFile,
+                    onStatus = reportStatus
+                )
             } else {
-                onDeviceEngine.ensureReady(reportStatus)
+                onDeviceEngine.ensureReady(
+                    sttEngineMode = sttEngineMode,
+                    skipSttDownload = hasSubtitleFile,
+                    onStatus = reportStatus
+                )
             }
         }
 
@@ -246,7 +267,8 @@ class DubbingWorker(
                         startMs = chunk.startMs,
                         endMs = chunk.endMs,
                         origWavFile = origWav,
-                        sttWavFile = sttWav
+                        sttWavFile = sttWav,
+                        enableVocalIsolationForStt = vocalIsolationEnabled
                     )
                     currentChunk = currentChunk.copy(
                         origWavPath = origWav.absolutePath,
@@ -276,16 +298,29 @@ class DubbingWorker(
                     )
 
                     val knownSpeakers = repository.getSpeakers(projectId)
-                    val sttResult = if (useOnDevice) {
-                        onDeviceEngine.transcribeAudioChunk(
+                    val chunkDurationMs = (chunk.endMs - chunk.startMs).coerceAtLeast(1000L)
+                    val sttResult = when {
+                        hasSubtitleFile -> {
+                            val chunkPhrases = SrtSubtitleParser.slicesForChunk(
+                                cues = parsedSubtitleCues,
+                                chunkStartMs = chunk.startMs,
+                                chunkEndMs = chunk.endMs
+                            )
+                            onDeviceEngine.transcribeWithSubtitleCues(
+                                sttWavFile = sttWav,
+                                phrases = chunkPhrases,
+                                chunkDurationMs = chunkDurationMs
+                            )
+                        }
+                        useOnDevice -> onDeviceEngine.transcribeAudioChunk(
                             sttWavFile = sttWav,
-                            chunkDurationMs = (chunk.endMs - chunk.startMs).coerceAtLeast(1000L)
+                            chunkDurationMs = chunkDurationMs,
+                            sttEngineMode = sttEngineMode
                         )
-                    } else {
-                        callWithRateLimitRetry {
+                        else -> callWithRateLimitRetry {
                             aiService.transcribeAudioChunk(
                                 sttWavFile = sttWav,
-                                chunkDurationMs = (chunk.endMs - chunk.startMs).coerceAtLeast(1000L),
+                                chunkDurationMs = chunkDurationMs,
                                 knownSpeakers = knownSpeakers
                             )
                         }

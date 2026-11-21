@@ -76,6 +76,20 @@ object EngineMode {
     val all = listOf(ON_DEVICE_FREE, ON_DEVICE_LLM, GEMINI_CLOUD)
 }
 
+object SttEngineMode {
+    const val VOSK_FAST = "VOSK_FAST"
+    const val WHISPER_TINY_EN = "WHISPER_TINY_EN"
+    const val WHISPER_BASE_EN = "WHISPER_BASE_EN"
+
+    val all = listOf(VOSK_FAST, WHISPER_TINY_EN, WHISPER_BASE_EN)
+
+    fun displayLabel(mode: String): String = when (mode) {
+        WHISPER_TINY_EN -> "Whisper Tiny EN (~32 MB)"
+        WHISPER_BASE_EN -> "Whisper Base EN (~60 MB)"
+        else -> "Vosk Fast EN (~40 MB)"
+    }
+}
+
 @Entity(tableName = "movie_projects")
 data class MovieProjectEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
@@ -113,6 +127,8 @@ data class MovieProjectEntity(
     val exportPath: String? = null,
     val exportSizeBytes: Long = 0L,
     val tempFilesCleaned: Boolean = false,
+    val subtitlePath: String? = null,
+    val subtitleFileName: String? = null,
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis()
 )

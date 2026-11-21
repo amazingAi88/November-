@@ -1,6 +1,9 @@
 package com.example.data.local
 
 import android.content.Context
+import android.net.Uri
+import android.provider.OpenableColumns
+import com.example.media.SrtSubtitleParser
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
@@ -99,6 +102,44 @@ class DubbingRepository(
 
     fun exportsDir(): File =
         File(context.filesDir, "exports").apply { mkdirs() }
+
+    suspend fun saveSubtitleFromUri(projectId: Long, sourceUri: Uri): Pair<String, Int> = withContext(Dispatchers.IO) {
+        var displayName = "subtitles.srt"
+        context.contentResolver.query(sourceUri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+            if (c.moveToFirst()) {
+                val idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (idx >= 0) {
+                    val raw = c.getString(idx)?.trim()
+                    if (!raw.isNullOrBlank()) displayName = raw
+                }
+            }
+        }
+        val rawText = context.contentResolver.openInputStream(sourceUri)?.bufferedReader()?.use { it.readText() }
+            ?: throw IllegalStateException("Unable to read selected subtitle file.")
+        val cues = SrtSubtitleParser.parse(rawText)
+        require(cues.isNotEmpty()) {
+            "No valid .srt or .vtt subtitle cues found in $displayName."
+        }
+        val safeExt = if (displayName.endsWith(".vtt", ignoreCase = true)) "vtt" else "srt"
+        val destFile = File(projectDir(projectId), "imported_subtitles.$safeExt")
+        destFile.writeText(rawText)
+
+        getProject(projectId)?.let { proj ->
+            updateProject(
+                proj.copy(
+                    subtitlePath = destFile.absolutePath,
+                    subtitleFileName = displayName
+                )
+            )
+        }
+        displayName to cues.size
+    }
+
+    suspend fun clearProjectSubtitle(projectId: Long) = withContext(Dispatchers.IO) {
+        val proj = getProject(projectId) ?: return@withContext
+        proj.subtitlePath?.let { path -> runCatching { File(path).delete() } }
+        updateProject(proj.copy(subtitlePath = null, subtitleFileName = null))
+    }
 
     suspend fun getTempWorkspaceSizeBytes(projectId: Long? = null): Long = withContext(Dispatchers.IO) {
         val root = if (projectId != null) projectDir(projectId) else File(context.filesDir, "projects")

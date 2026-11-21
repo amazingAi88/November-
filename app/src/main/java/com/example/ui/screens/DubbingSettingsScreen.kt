@@ -1,5 +1,7 @@
 package com.example.ui.screens
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -26,10 +28,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material.icons.filled.Translate
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -39,6 +43,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -49,6 +54,8 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -73,6 +80,7 @@ import com.example.data.local.DialogueStyle
 import com.example.data.local.DubbingSpeedMode
 import com.example.data.local.EngineMode
 import com.example.data.local.SpeakerEntity
+import com.example.data.local.SttEngineMode
 import com.example.media.AudioPlaybackState
 import com.example.media.WavUtils
 import com.example.ui.components.StatusPill
@@ -110,8 +118,18 @@ fun DubbingSettingsScreen(
     val voicePreviewState by viewModel.voicePreviewState.collectAsStateWithLifecycle()
     val activeGgufModelName by viewModel.activeGgufModelName.collectAsStateWithLifecycle()
     val dubbingSpeedMode by viewModel.dubbingSpeedMode.collectAsStateWithLifecycle()
+    val sttEngineMode by viewModel.sttEngineMode.collectAsStateWithLifecycle()
+    val sttVocalIsolationEnabled by viewModel.sttVocalIsolationEnabled.collectAsStateWithLifecycle()
     val banner by viewModel.statusBanner.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
+
+    val subtitlePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            viewModel.attachSubtitleFile(uri)
+        }
+    }
 
     var genderFilter by remember { mutableStateOf("ALL") }
     var auditionText by remember { mutableStateOf("") }
@@ -331,6 +349,148 @@ fun DubbingSettingsScreen(
                                             },
                                             style = MaterialTheme.typography.bodySmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            }
+                            if (currentProject.engineMode == EngineMode.ON_DEVICE_FREE || currentProject.engineMode == EngineMode.ON_DEVICE_LLM) {
+                                Spacer(modifier = Modifier.height(10.dp))
+                                Text("Speech Recognition (STT) & Noise Filter", style = MaterialTheme.typography.titleSmall)
+                                Spacer(modifier = Modifier.height(4.dp))
+                                if (!currentProject.subtitlePath.isNullOrBlank()) {
+                                    Text(
+                                        text = "Subtitles attached (${currentProject.subtitleFileName ?: "subtitles"}) — offline STT is skipped so movie lines are 100% clean.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = EmeraldSuccess
+                                    )
+                                } else {
+                                    FlowRow(
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        SttEngineMode.all.forEach { sttMode ->
+                                            FilterChip(
+                                                selected = sttEngineMode == sttMode,
+                                                onClick = { viewModel.updateSttEngineMode(sttMode) },
+                                                label = { Text(SttEngineMode.displayLabel(sttMode)) },
+                                                colors = FilterChipDefaults.filterChipColors(
+                                                    selectedContainerColor = SaffronContainer,
+                                                    selectedLabelColor = SaffronGold
+                                                ),
+                                                modifier = Modifier.testTag("project_stt_engine_$sttMode")
+                                            )
+                                        }
+                                    }
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text("Vocal-Isolation Pre-Filter", style = MaterialTheme.typography.bodyMedium)
+                                            Text(
+                                                "Center vocal extraction + 160–3600 Hz bandpass before STT",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                        Switch(
+                                            checked = sttVocalIsolationEnabled,
+                                            onCheckedChange = { viewModel.updateSttVocalIsolationEnabled(it) },
+                                            colors = SwitchDefaults.colors(checkedThumbColor = SaffronGold),
+                                            modifier = Modifier.testTag("project_vocal_isolation_switch")
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Optional .SRT / .VTT Subtitle Track Card (Zero-Error Dialogue Input)
+                item {
+                    val hasSub = !currentProject.subtitlePath.isNullOrBlank()
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("project_subtitle_card"),
+                        colors = CardDefaults.cardColors(containerColor = ObsidianSurface),
+                        border = BorderStroke(
+                            width = 1.dp,
+                            color = if (hasSub) EmeraldSuccess.copy(alpha = 0.55f) else ElectricCyan.copy(alpha = 0.45f)
+                        ),
+                        shape = MaterialTheme.shapes.large
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Filled.Subtitles,
+                                        contentDescription = null,
+                                        tint = if (hasSub) EmeraldSuccess else ElectricCyan
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Column {
+                                        Text(".SRT / .VTT Subtitle Track (Optional)", style = MaterialTheme.typography.titleMedium)
+                                        Text(
+                                            if (hasSub) {
+                                                currentProject.subtitleFileName ?: "subtitles.srt"
+                                            } else {
+                                                "Attach English subtitles for 100% accurate movie lines"
+                                            },
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = if (hasSub) EmeraldSuccess else MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                                StatusPill(
+                                    label = if (hasSub) "ATTACHED" else "STT AUTO",
+                                    tone = if (hasSub) "SUCCESS" else "ACTIVE"
+                                )
+                            }
+                            Text(
+                                text = "When attached, speech recognition is skipped cleanly while keeping voice pitch detection (Male/Female), Vocal SFX preservation & BGM mixing active.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                OutlinedButton(
+                                    onClick = { subtitlePickerLauncher.launch(arrayOf("*/*")) },
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(48.dp)
+                                        .testTag("project_subtitle_picker_button")
+                                ) {
+                                    Icon(Icons.Filled.Subtitles, contentDescription = null, tint = ElectricCyan)
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(if (hasSub) "Replace .SRT / .VTT" else "Attach .SRT / .VTT File")
+                                }
+                                if (hasSub) {
+                                    IconButton(
+                                        onClick = { viewModel.clearSubtitleFile() },
+                                        modifier = Modifier
+                                            .size(48.dp)
+                                            .testTag("project_subtitle_clear_button")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Filled.Close,
+                                            contentDescription = "Remove attached subtitle file",
+                                            tint = ErrorCrimson
                                         )
                                     }
                                 }

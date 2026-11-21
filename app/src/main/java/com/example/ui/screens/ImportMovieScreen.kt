@@ -21,9 +21,12 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material.icons.outlined.SdStorage
 import androidx.compose.material.icons.outlined.VideoFile
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -69,12 +72,21 @@ fun ImportMovieScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val availableBytes by viewModel.availableStorageBytes.collectAsStateWithLifecycle()
     val mediaAccelSettings by viewModel.mediaAccelSettings.collectAsStateWithLifecycle()
+    val subtitleError by viewModel.subtitleError.collectAsStateWithLifecycle()
 
     val videoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
         if (uri != null) {
             viewModel.inspectPickedVideo(uri)
+        }
+    }
+
+    val subtitlePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            viewModel.attachSubtitleUri(uri)
         }
     }
 
@@ -294,6 +306,86 @@ fun ImportMovieScreen(
                                                 modifier = Modifier.testTag("chunk_chip_${sec}s")
                                             )
                                         }
+                                    }
+                                }
+                            }
+                        }
+
+                        item {
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("import_subtitle_card"),
+                                colors = CardDefaults.cardColors(containerColor = ObsidianSurface),
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (state.subtitleCueCount > 0) SaffronGold.copy(alpha = 0.65f) else ObsidianBorder
+                                ),
+                                shape = MaterialTheme.shapes.large
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(16.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Icon(Icons.Filled.Subtitles, contentDescription = null, tint = SaffronGold)
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Column {
+                                                Text(
+                                                    text = "Optional .SRT / .VTT Subtitles",
+                                                    style = MaterialTheme.typography.titleMedium
+                                                )
+                                                Text(
+                                                    text = if (state.subtitleCueCount > 0) {
+                                                        "${state.subtitleFileName} • ${state.subtitleCueCount} dialogue lines ready"
+                                                    } else {
+                                                        "Gives 100% exact English text & skips slow speech recognition (2x faster)"
+                                                    },
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = if (state.subtitleCueCount > 0) SaffronGold else MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+                                        }
+                                        if (state.subtitleCueCount > 0) {
+                                            IconButton(
+                                                onClick = { viewModel.clearAttachedSubtitle() },
+                                                modifier = Modifier.testTag("clear_import_subtitle_button")
+                                            ) {
+                                                Icon(Icons.Filled.Close, contentDescription = "Remove subtitle file")
+                                            }
+                                        }
+                                    }
+                                    if (!subtitleError.isNullOrBlank()) {
+                                        Text(
+                                            text = subtitleError!!,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.error
+                                        )
+                                    }
+                                    OutlinedButton(
+                                        onClick = {
+                                            subtitlePickerLauncher.launch(
+                                                arrayOf("application/x-subrip", "text/vtt", "text/plain", "*/*")
+                                            )
+                                        },
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(48.dp)
+                                            .testTag("pick_subtitle_import_button")
+                                    ) {
+                                        Icon(Icons.Filled.Subtitles, contentDescription = null)
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            if (state.subtitleCueCount > 0) "Replace .SRT / .VTT File" else "Attach .SRT / .VTT Subtitle File"
+                                        )
                                     }
                                 }
                             }

@@ -30,7 +30,8 @@ object AudioChunkExtractor {
         startMs: Long,
         endMs: Long,
         origWavFile: File,
-        sttWavFile: File
+        sttWavFile: File,
+        enableVocalIsolationForStt: Boolean = true
     ) = withContext(Dispatchers.IO) {
         val extractor = MediaExtractor()
         var codec: MediaCodec? = null
@@ -80,6 +81,7 @@ object AudioChunkExtractor {
                     WavUtils.writeHeader(sttRaf, STT_SAMPLE_RATE, STT_CHANNELS, 16, 0L)
 
                     val bufferInfo = MediaCodec.BufferInfo()
+                    val vocalFilterState = VocalIsolationFilter.StreamState(STT_SAMPLE_RATE)
                     var inputDone = false
                     var outputDone = false
                     val startUs = startMs * 1000L
@@ -176,14 +178,28 @@ object AudioChunkExtractor {
                                             origRaf.write(mixBytes)
                                             origDataBytes += mixBytes.size
 
-                                            val sttShorts = WavUtils.convertAndTimeScalePcm(
-                                                input = slice,
-                                                srcRate = codecSampleRate,
-                                                srcChannels = codecChannels,
-                                                dstRate = STT_SAMPLE_RATE,
-                                                dstChannels = STT_CHANNELS,
-                                                timeScale = 1.0f
-                                            )
+                                            val rawSttShorts = if (enableVocalIsolationForStt && codecChannels >= 2) {
+                                                VocalIsolationFilter.extractCenterFocusedMono(
+                                                    input = slice,
+                                                    srcRate = codecSampleRate,
+                                                    srcChannels = codecChannels,
+                                                    dstRate = STT_SAMPLE_RATE
+                                                )
+                                            } else {
+                                                WavUtils.convertAndTimeScalePcm(
+                                                    input = slice,
+                                                    srcRate = codecSampleRate,
+                                                    srcChannels = codecChannels,
+                                                    dstRate = STT_SAMPLE_RATE,
+                                                    dstChannels = STT_CHANNELS,
+                                                    timeScale = 1.0f
+                                                )
+                                            }
+                                            val sttShorts = if (enableVocalIsolationForStt) {
+                                                vocalFilterState.processSttChunk(rawSttShorts)
+                                            } else {
+                                                rawSttShorts
+                                            }
                                             val sttBytes = WavUtils.shortArrayToBytes(sttShorts)
                                             sttRaf.write(sttBytes)
                                             sttDataBytes += sttBytes.size

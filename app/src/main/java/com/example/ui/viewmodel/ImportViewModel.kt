@@ -9,9 +9,12 @@ import com.example.data.local.DubbingRepository
 import com.example.data.local.MovieProjectEntity
 import com.example.data.local.PreferencesRepository
 import com.example.data.local.SeparationMode
+import android.provider.OpenableColumns
 import com.example.media.InspectedMovie
 import com.example.media.MediaAccelSettings
 import com.example.media.MediaInspector
+import com.example.media.SrtSubtitleParser
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -27,7 +30,10 @@ sealed interface ImportUiState {
     data object Inspecting : ImportUiState
     data class Ready(
         val movie: InspectedMovie,
-        val chunkDurationSec: Int
+        val chunkDurationSec: Int,
+        val subtitleFileName: String? = null,
+        val subtitleCueCount: Int = 0,
+        val subtitleRawContent: String? = null
     ) : ImportUiState
     data class Error(val message: String) : ImportUiState
 }
@@ -46,9 +52,17 @@ class ImportViewModel(application: Application) : AndroidViewModel(application) 
     private val _availableStorageBytes = MutableStateFlow(MediaInspector.getAvailableStorageBytes(application))
     val availableStorageBytes: StateFlow<Long> = _availableStorageBytes.asStateFlow()
 
+    private val _subtitleError = MutableStateFlow<String?>(null)
+    val subtitleError: StateFlow<String?> = _subtitleError.asStateFlow()
+
+    fun clearSubtitleError() {
+        _subtitleError.value = null
+    }
+
     fun inspectPickedVideo(uri: Uri) {
         viewModelScope.launch {
             _uiState.value = ImportUiState.Inspecting
+            _subtitleError.value = null
             try {
                 val context = getApplication<Application>()
                 try {
@@ -72,6 +86,51 @@ class ImportViewModel(application: Application) : AndroidViewModel(application) 
                 )
             }
         }
+    }
+
+    fun attachSubtitleUri(uri: Uri) {
+        val current = _uiState.value as? ImportUiState.Ready ?: return
+        viewModelScope.launch {
+            _subtitleError.value = null
+            try {
+                val context = getApplication<Application>()
+                var displayName = "subtitles.srt"
+                context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                    if (c.moveToFirst()) {
+                        val idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                        if (idx >= 0) {
+                            val raw = c.getString(idx)?.trim()
+                            if (!raw.isNullOrBlank()) displayName = raw
+                        }
+                    }
+                }
+                val rawText = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                    context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+                } ?: throw IllegalStateException("Unable to read selected subtitle file.")
+                val cues = SrtSubtitleParser.parse(rawText)
+                if (cues.isEmpty()) {
+                    _subtitleError.value = "No valid .srt or .vtt cues found in $displayName."
+                    return@launch
+                }
+                _uiState.value = current.copy(
+                    subtitleFileName = displayName,
+                    subtitleCueCount = cues.size,
+                    subtitleRawContent = rawText
+                )
+            } catch (e: Exception) {
+                _subtitleError.value = e.localizedMessage ?: "Failed to parse subtitle file."
+            }
+        }
+    }
+
+    fun clearAttachedSubtitle() {
+        val current = _uiState.value as? ImportUiState.Ready ?: return
+        _subtitleError.value = null
+        _uiState.value = current.copy(
+            subtitleFileName = null,
+            subtitleCueCount = 0,
+            subtitleRawContent = null
+        )
     }
 
     fun updateChunkDuration(seconds: Int) {
@@ -118,15 +177,28 @@ class ImportViewModel(application: Application) : AndroidViewModel(application) 
                 )
             )
 
-            // Copy thumbnail into project folder
+            // Copy thumbnail & optional subtitle into project folder
             val tempThumb = movie.thumbnailTempFile
+            var updatedProj = repository.getProject(insertedId)
             if (tempThumb != null && tempThumb.exists()) {
                 val destThumb = File(repository.projectDir(insertedId), "thumbnail.jpg")
                 tempThumb.copyTo(destThumb, overwrite = true)
                 tempThumb.delete()
-                repository.getProject(insertedId)?.let { proj ->
-                    repository.updateProject(proj.copy(thumbnailPath = destThumb.absolutePath))
-                }
+                updatedProj = updatedProj?.copy(thumbnailPath = destThumb.absolutePath)
+            }
+            val rawSub = current.subtitleRawContent
+            val subName = current.subtitleFileName
+            if (!rawSub.isNullOrBlank() && !subName.isNullOrBlank()) {
+                val ext = if (subName.endsWith(".vtt", ignoreCase = true)) "vtt" else "srt"
+                val destSub = File(repository.projectDir(insertedId), "imported_subtitles.$ext")
+                kotlinx.coroutines.withContext(Dispatchers.IO) { destSub.writeText(rawSub) }
+                updatedProj = updatedProj?.copy(
+                    subtitlePath = destSub.absolutePath,
+                    subtitleFileName = subName
+                )
+            }
+            if (updatedProj != null) {
+                repository.updateProject(updatedProj)
             }
 
             onProjectCreated(insertedId)

@@ -25,7 +25,8 @@ object OnDeviceSpeakerAnalyzer {
     fun analyzeSpeakersAndBuildTimeline(
         sttWavFile: File,
         phrases: List<SpeechRawPhrase>,
-        chunkDurationMs: Long
+        chunkDurationMs: Long,
+        mergeChoppyPhrases: Boolean = true
     ): ChunkTranscriptionResult {
         val header = WavUtils.readHeader(sttWavFile)
         val sampleRate = header.sampleRate.coerceAtLeast(AudioChunkExtractor.STT_SAMPLE_RATE)
@@ -50,9 +51,14 @@ object OnDeviceSpeakerAnalyzer {
         val timeline = mutableListOf<TranscribedSegment>()
 
         var cursorMs = 0L
-        val sortedPhrases = phrases
-            .filter { it.text.isNotBlank() && it.endOffsetMs > it.startOffsetMs }
-            .sortedBy { it.startOffsetMs }
+        val preparedPhrases = if (mergeChoppyPhrases) {
+            TranscriptRepairHelper.mergeAndRepairPhrases(phrases)
+        } else {
+            phrases
+                .filter { it.text.isNotBlank() && it.endOffsetMs > it.startOffsetMs }
+                .sortedBy { it.startOffsetMs }
+        }
+        val sortedPhrases = preparedPhrases
 
         for (phrase in sortedPhrases) {
             val sMs = phrase.startOffsetMs.coerceIn(0L, chunkDurationMs)

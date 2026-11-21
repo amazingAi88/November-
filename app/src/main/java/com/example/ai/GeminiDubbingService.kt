@@ -225,6 +225,9 @@ class GeminiDubbingService {
             val sp = speakerMap[seg.speakerLabel]
             val prevText = speechSegments.getOrNull(idx - 1)?.englishText.orEmpty()
             val nextText = speechSegments.getOrNull(idx + 1)?.englishText.orEmpty()
+            val sceneMood = TranscriptRepairHelper.inferSceneMood(speechSegments, idx)
+            val listenerGender = TranscriptRepairHelper.inferListenerGender(speechSegments, idx, speakerMap)
+            val isGarbled = TranscriptRepairHelper.isLikelyAsrGarble(seg.englishText)
             val segMatches = if (dictionaryConfig != null) {
                 SlangDictionaryManager.resolveMatches(
                     config = dictionaryConfig,
@@ -242,6 +245,9 @@ class GeminiDubbingService {
                     put("segmentId", seg.id)
                     put("speaker", seg.speakerLabel)
                     put("gender", sp?.gender ?: "NEUTRAL")
+                    if (!listenerGender.isNullOrBlank()) put("listenerGender", listenerGender)
+                    put("sceneMood", sceneMood)
+                    if (isGarbled) put("asrMayHaveErrors", true)
                     put("characterNotes", sp?.traits ?: "")
                     put("emotion", seg.emotion)
                     put("targetDurationMs", (seg.endMs - seg.startMs).coerceAtLeast(300L))
@@ -257,7 +263,8 @@ class GeminiDubbingService {
             Style requested: $dialogueStyle.
             Strict requirements:
             - Natural, fluent spoken Hindi/Hindustani (avoid stiff literal textbook translations).
-            - Preserve original meaning, character personality, sarcasm/humor, and emotional tone.
+            - Match speaker gender and listenerGender in Hindi verb & pronoun endings (e.g., कर रहे हो vs कर रही हो).
+            - Use `sceneMood` and surrounding lines to keep scene continuity and repair any phonetically garbled lines (`asrMayHaveErrors: true`) into natural intended movie dialogue.
             - Keep Hindi line length appropriate so it can be spoken naturally inside targetDurationMs.
             - Do NOT omit or merge any segmentId. Return one translation object per input segmentId.
             ${if (glossarySection.isNotBlank()) "\n$glossarySection\n" else ""}

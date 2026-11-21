@@ -10,8 +10,6 @@ import kotlinx.coroutines.withContext
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.FileOutputStream
-import java.net.HttpURLConnection
-import java.net.URL
 import kotlin.coroutines.coroutineContext
 
 data class GgufModelPreset(
@@ -29,6 +27,13 @@ data class InstalledGgufModel(
     val file: File,
     val sizeBytes: Long,
     val isValidGguf: Boolean
+)
+
+data class PartialGgufDownload(
+    val fileName: String,
+    val bytesDownloaded: Long,
+    val approxTotalMb: Int,
+    val progressFraction: Float
 )
 
 /**
@@ -116,6 +121,34 @@ object LocalLlmModelManager {
     fun hasReadyModel(context: Context, preferredFileName: String? = null): Boolean =
         resolveActiveModelFile(context, preferredFileName) != null
 
+    fun listPartialDownloads(context: Context): Map<String, PartialGgufDownload> {
+        val dir = modelsDir(context)
+        val result = mutableMapOf<String, PartialGgufDownload>()
+        for (preset in PRESETS) {
+            val finalFile = File(dir, preset.fileName)
+            if (isValidGgufFile(finalFile)) continue
+            val partFile = File(dir, "${preset.fileName}.part")
+            if (partFile.exists() && partFile.isFile && partFile.length() > 0L) {
+                val approxBytes = (preset.approxSizeMb.toLong() * 1024L * 1024L).coerceAtLeast(1L)
+                val frac = (partFile.length().toFloat() / approxBytes.toFloat()).coerceIn(0.01f, 0.99f)
+                result[preset.fileName] = PartialGgufDownload(
+                    fileName = preset.fileName,
+                    bytesDownloaded = partFile.length(),
+                    approxTotalMb = preset.approxSizeMb,
+                    progressFraction = frac
+                )
+            }
+        }
+        return result
+    }
+
+    fun deletePartialDownload(context: Context, fileName: String): Long {
+        val partFile = File(modelsDir(context), "$fileName.part")
+        val size = if (partFile.exists()) partFile.length() else 0L
+        partFile.delete()
+        return size
+    }
+
     suspend fun downloadPresetModel(
         context: Context,
         preset: GgufModelPreset,
@@ -129,85 +162,22 @@ object LocalLlmModelManager {
         }
 
         val partFile = File(dir, "${preset.fileName}.part")
-        partFile.delete()
-
-        var currentUrl = preset.downloadUrl
-        var redirects = 0
-        var activeConn: HttpURLConnection? = null
-        while (redirects < 8) {
-            coroutineContext.ensureActive()
-            val conn = (URL(currentUrl).openConnection() as HttpURLConnection).apply {
-                connectTimeout = 25_000
-                readTimeout = 45_000
-                instanceFollowRedirects = false
-                setRequestProperty("User-Agent", "HindiMovieDubbingStudio/1.0")
+        val approxTotalBytes = preset.approxSizeMb.toLong() * 1024L * 1024L
+        ResumableHttpDownloader.downloadToFile(
+            url = preset.downloadUrl,
+            partFile = partFile,
+            destFile = finalFile,
+            fallbackApproxBytes = approxTotalBytes,
+            reportIntervalBytes = 1024L * 1024L,
+            validateComplete = { f -> isValidGgufFile(f) },
+            onProgress = { downloadedBytes, totalBytes ->
+                val dlMb = downloadedBytes / (1024f * 1024f)
+                val totBytes = totalBytes.coerceAtLeast(approxTotalBytes).coerceAtLeast(1L)
+                val totMb = totBytes / (1024f * 1024f)
+                val frac = (downloadedBytes.toFloat() / totBytes.toFloat()).coerceIn(0f, 1f)
+                onProgress(dlMb, totMb, frac)
             }
-            val code = conn.responseCode
-            if (code == HttpURLConnection.HTTP_MOVED_PERM ||
-                code == HttpURLConnection.HTTP_MOVED_TEMP ||
-                code == HttpURLConnection.HTTP_SEE_OTHER ||
-                code == 307 || code == 308
-            ) {
-                val loc = conn.getHeaderField("Location")
-                conn.disconnect()
-                if (loc.isNullOrBlank()) throw IllegalStateException("Redirect missing Location header.")
-                currentUrl = URL(URL(currentUrl), loc).toString()
-                redirects++
-            } else {
-                activeConn = conn
-                break
-            }
-        }
-
-        val conn = activeConn ?: throw IllegalStateException("Too many HTTP redirects downloading GGUF model.")
-        try {
-            if (conn.responseCode !in 200..299) {
-                throw IllegalStateException("HTTP ${conn.responseCode} while downloading ${preset.displayName}.")
-            }
-            val totalBytes = conn.contentLengthLong.takeIf { it > 0L }
-                ?: (preset.approxSizeMb.toLong() * 1024L * 1024L)
-            val totalMb = totalBytes / (1024f * 1024f)
-            var downloaded = 0L
-            var lastReport = 0L
-            val buf = ByteArray(64 * 1024)
-
-            BufferedInputStream(conn.inputStream, 64 * 1024).use { input ->
-                FileOutputStream(partFile).use { output ->
-                    while (true) {
-                        coroutineContext.ensureActive()
-                        val read = input.read(buf)
-                        if (read < 0) break
-                        output.write(buf, 0, read)
-                        downloaded += read
-                        if (downloaded - lastReport >= 2L * 1024L * 1024L) {
-                            lastReport = downloaded
-                            val dlMb = downloaded / (1024f * 1024f)
-                            val frac = (downloaded.toFloat() / totalBytes.toFloat()).coerceIn(0f, 0.99f)
-                            onProgress(dlMb, totalMb, frac)
-                        }
-                    }
-                }
-            }
-
-            if (!isValidGgufFile(partFile)) {
-                partFile.delete()
-                throw IllegalStateException("Downloaded file did not have a valid GGUF header.")
-            }
-
-            if (finalFile.exists()) finalFile.delete()
-            if (!partFile.renameTo(finalFile)) {
-                partFile.copyTo(finalFile, overwrite = true)
-                partFile.delete()
-            }
-            val finalMb = finalFile.length() / (1024f * 1024f)
-            onProgress(finalMb, finalMb, 1f)
-            finalFile
-        } catch (e: Exception) {
-            partFile.delete()
-            throw e
-        } finally {
-            conn.disconnect()
-        }
+        )
     }
 
     suspend fun importGgufFromUri(
@@ -300,9 +270,15 @@ object LocalLlmModelManager {
     }
 
     fun deleteModel(context: Context, fileName: String): Long {
-        val file = File(modelsDir(context), fileName)
-        val size = if (file.exists()) file.length() else 0L
+        val dir = modelsDir(context)
+        val file = File(dir, fileName)
+        val partFile = File(dir, "$fileName.part")
+        var size = if (file.exists()) file.length() else 0L
         file.delete()
+        if (partFile.exists()) {
+            size += partFile.length()
+            partFile.delete()
+        }
         return size
     }
 }

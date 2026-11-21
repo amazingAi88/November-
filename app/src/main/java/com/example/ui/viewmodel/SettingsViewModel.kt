@@ -11,16 +11,20 @@ import com.example.ai.LocalLlmModelManager
 import com.example.ai.LocalLlmSampleResult
 import com.example.ai.OnDeviceModelManager
 import com.example.ai.OnDeviceModelsStatus
+import com.example.ai.PartialGgufDownload
 import com.example.ai.SlangDictionaryConfig
 import com.example.ai.SlangDictionaryManager
 import com.example.ai.SlangOverrideRule
 import com.example.data.local.DubbingRepository
 import com.example.data.local.PreferencesRepository
+import com.example.data.local.SttEngineMode
 import com.example.data.local.StudioPreferences
 import com.example.media.Media3HardwareConfig
 import com.example.media.MediaCodecCapabilitiesSummary
 import com.example.media.WavUtils
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -53,6 +57,9 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     private val _installedGgufModels = MutableStateFlow<List<InstalledGgufModel>>(emptyList())
     val installedGgufModels: StateFlow<List<InstalledGgufModel>> = _installedGgufModels.asStateFlow()
 
+    private val _partialGgufDownloads = MutableStateFlow<Map<String, PartialGgufDownload>>(emptyMap())
+    val partialGgufDownloads: StateFlow<Map<String, PartialGgufDownload>> = _partialGgufDownloads.asStateFlow()
+
     private val _deviceRamGb = MutableStateFlow(LocalLlmModelManager.getDeviceTotalRamGb(application))
     val deviceRamGb: StateFlow<Float> = _deviceRamGb.asStateFlow()
 
@@ -64,6 +71,8 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     private val _ggufProgressText = MutableStateFlow<String?>(null)
     val ggufProgressText: StateFlow<String?> = _ggufProgressText.asStateFlow()
+
+    private var ggufDownloadJob: Job? = null
 
     private val _sampleTestOutput = MutableStateFlow<LocalLlmSampleResult?>(null)
     val sampleTestOutput: StateFlow<LocalLlmSampleResult?> = _sampleTestOutput.asStateFlow()
@@ -188,10 +197,13 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     fun refreshGgufModels() {
         viewModelScope.launch {
-            val models = withContext(Dispatchers.IO) {
-                LocalLlmModelManager.listInstalledModels(getApplication())
+            val (models, partials) = withContext(Dispatchers.IO) {
+                val installed = LocalLlmModelManager.listInstalledModels(getApplication())
+                val partialMap = LocalLlmModelManager.listPartialDownloads(getApplication())
+                installed to partialMap
             }
             _installedGgufModels.value = models
+            _partialGgufDownloads.value = partials
             _deviceRamGb.value = LocalLlmModelManager.getDeviceTotalRamGb(getApplication())
         }
     }
@@ -202,11 +214,15 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             _isManagingModels.value = true
             _modelProgressText.value = "Preparing download..."
             try {
-                OnDeviceModelManager.ensureAllModelsReady(getApplication()) { status ->
+                val activeStt = preferences.value.sttEngineMode
+                OnDeviceModelManager.ensureAllModelsReady(
+                    context = getApplication(),
+                    sttEngineMode = activeStt
+                ) { status ->
                     _modelProgressText.value = status
                 }
                 refreshModelsStatus()
-                _message.value = "On-device English STT, Hindi Translator & Android TTS are ready."
+                _message.value = "${SttEngineMode.displayLabel(activeStt)}, ML Kit EN→HI & Android TTS are ready."
             } catch (e: Exception) {
                 refreshModelsStatus()
                 _message.value = e.localizedMessage ?: "Model setup failed."
@@ -233,10 +249,15 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     fun downloadGgufPreset(preset: GgufModelPreset) {
         if (_isManagingGguf.value) return
-        viewModelScope.launch {
+        val existingPartial = _partialGgufDownloads.value[preset.fileName]
+        ggufDownloadJob = viewModelScope.launch {
             _isManagingGguf.value = true
-            _ggufProgress.value = 0f
-            _ggufProgressText.value = "Connecting to download ${preset.displayName}..."
+            _ggufProgress.value = existingPartial?.progressFraction ?: 0f
+            _ggufProgressText.value = if (existingPartial != null) {
+                "Resuming ${preset.fileName} from ${(existingPartial.progressFraction * 100f).toInt()}%..."
+            } else {
+                "Connecting to download ${preset.displayName}..."
+            }
             try {
                 val file = LocalLlmModelManager.downloadPresetModel(
                     context = getApplication(),
@@ -254,16 +275,33 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                     )
                 }
                 preferencesRepository.setActiveGgufModelFileName(file.name)
-                refreshGgufModels()
                 _message.value = "${preset.displayName} is installed & set as active offline LLM."
+            } catch (_: CancellationException) {
+                _message.value = "Download paused — progress saved so you can resume anytime."
             } catch (e: Exception) {
-                refreshGgufModels()
-                _message.value = e.localizedMessage ?: "GGUF model download failed."
+                _message.value = e.localizedMessage ?: "GGUF model download failed (progress saved for resume)."
             } finally {
+                ggufDownloadJob = null
                 _isManagingGguf.value = false
                 _ggufProgress.value = null
                 _ggufProgressText.value = null
+                refreshGgufModels()
             }
+        }
+    }
+
+    fun pauseGgufDownload() {
+        ggufDownloadJob?.cancel()
+    }
+
+    fun discardPartialGguf(fileName: String) {
+        if (_isManagingGguf.value) return
+        viewModelScope.launch {
+            val freed = withContext(Dispatchers.IO) {
+                LocalLlmModelManager.deletePartialDownload(getApplication(), fileName)
+            }
+            refreshGgufModels()
+            _message.value = "Cleared saved partial download (${WavUtils.formatFileSize(freed)} freed)."
         }
     }
 
@@ -379,6 +417,8 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     fun setMediaHighOperatingRate(enabled: Boolean) = viewModelScope.launch { preferencesRepository.setMediaHighOperatingRate(enabled) }
     fun setMediaAllowCodecFallback(enabled: Boolean) = viewModelScope.launch { preferencesRepository.setMediaAllowCodecFallback(enabled) }
     fun setMediaTransformerTimeoutSec(seconds: Int) = viewModelScope.launch { preferencesRepository.setMediaTransformerTimeoutSec(seconds) }
+    fun setSttEngineMode(mode: String) = viewModelScope.launch { preferencesRepository.setSttEngineMode(mode) }
+    fun setSttVocalIsolationEnabled(enabled: Boolean) = viewModelScope.launch { preferencesRepository.setSttVocalIsolationEnabled(enabled) }
 
     fun cleanAllTempFiles() {
         viewModelScope.launch {

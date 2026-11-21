@@ -58,6 +58,7 @@ class LocalGgufTranslator {
         val systemPrompt = buildCinemaSystemPrompt(dialogueStyle)
         val total = speechSegments.size
         val results = mutableListOf<TranslatedLine>()
+        val recentTranslatedHindi = mutableListOf<String>()
 
         mutex.withLock {
             var handle: LlamaModel? = null
@@ -67,6 +68,10 @@ class LocalGgufTranslator {
 
                 val prevText = speechSegments.getOrNull(idx - 1)?.englishText.orEmpty()
                 val nextText = speechSegments.getOrNull(idx + 1)?.englishText.orEmpty()
+                val sceneMood = TranscriptRepairHelper.inferSceneMood(speechSegments, idx)
+                val listenerGender = TranscriptRepairHelper.inferListenerGender(speechSegments, idx, speakerMap)
+                val isGarbledAsr = TranscriptRepairHelper.isLikelyAsrGarble(seg.englishText)
+                val prevHindiHint = recentTranslatedHindi.lastOrNull()
 
                 val prep = if (dictionaryConfig != null) {
                     SlangDictionaryManager.prepareProtectedText(
@@ -95,11 +100,12 @@ class LocalGgufTranslator {
                 } else null
 
                 // Fast-path 3 (Hybrid Turbo): routine everyday lines go through ML Kit (~10 ms)
-                // while slang/adult/profane/complex lines stay on the Local GGUF LLM.
+                // while slang/adult/profane/complex/garbled-ASR lines stay on the Local GGUF LLM.
                 val useFastMlKit = fastDirect.isNullOrBlank() &&
                     fastFiller.isNullOrBlank() &&
                     hybridTurbo &&
                     fallbackTranslator != null &&
+                    !isGarbledAsr &&
                     !requiresLocalLlmContext(
                         englishText = seg.englishText,
                         prevText = prevText,
@@ -125,7 +131,12 @@ class LocalGgufTranslator {
                             handle = model,
                             seg = seg,
                             speaker = speakerMap[seg.speakerLabel],
+                            listenerGender = listenerGender,
+                            sceneMood = sceneMood,
                             prevEnglish = prevText.takeIf { it.isNotBlank() },
+                            prevHindi = prevHindiHint,
+                            nextEnglish = nextText.takeIf { it.isNotBlank() },
+                            asrMayHaveErrors = isGarbledAsr,
                             systemPrompt = systemPrompt,
                             dialogueStyle = dialogueStyle,
                             prep = prep,
@@ -134,9 +145,13 @@ class LocalGgufTranslator {
                     }
                 }
 
+                val resolvedHindi = finalHindi.ifBlank { seg.englishText }
+                if (containsDevanagari(resolvedHindi)) {
+                    recentTranslatedHindi.add(resolvedHindi.take(60))
+                }
                 val translated = TranslatedLine(
                     segmentId = seg.id,
-                    hindiText = finalHindi.ifBlank { seg.englishText },
+                    hindiText = resolvedHindi,
                     emotion = seg.emotion
                 )
                 results.add(translated)
@@ -277,7 +292,12 @@ class LocalGgufTranslator {
         handle: LlamaModel,
         seg: DialogueSegmentEntity,
         speaker: SpeakerEntity?,
+        listenerGender: String?,
+        sceneMood: String?,
         prevEnglish: String?,
+        prevHindi: String?,
+        nextEnglish: String?,
+        asrMayHaveErrors: Boolean,
         systemPrompt: String,
         dialogueStyle: String,
         prep: ProtectedTranslationPrep,
@@ -287,7 +307,12 @@ class LocalGgufTranslator {
         val prompt = buildSingleLinePrompt(
             englishLine = seg.englishText,
             prevEnglish = prevEnglish,
+            prevHindi = prevHindi,
+            nextEnglish = nextEnglish,
             speakerGender = speaker?.gender,
+            listenerGender = listenerGender,
+            sceneMood = sceneMood,
+            asrMayHaveErrors = asrMayHaveErrors,
             emotion = seg.emotion,
             glossaryHints = glossaryHints,
             dialogueStyle = dialogueStyle
@@ -375,7 +400,12 @@ class LocalGgufTranslator {
     internal fun buildSingleLinePrompt(
         englishLine: String,
         prevEnglish: String?,
+        prevHindi: String? = null,
+        nextEnglish: String? = null,
         speakerGender: String?,
+        listenerGender: String? = null,
+        sceneMood: String? = null,
+        asrMayHaveErrors: Boolean = false,
         emotion: String?,
         glossaryHints: String,
         dialogueStyle: String
@@ -383,12 +413,26 @@ class LocalGgufTranslator {
         if (glossaryHints.isNotBlank()) {
             appendLine(glossaryHints)
         }
-        if (!prevEnglish.isNullOrBlank()) {
-            appendLine("Previous context (do not translate): \"${prevEnglish.take(55)}\"")
+        if (!sceneMood.isNullOrBlank()) {
+            appendLine("Scene Mood: $sceneMood")
         }
-        if (!speakerGender.isNullOrBlank() && speakerGender != "NEUTRAL") {
-            val moodPart = if (!emotion.isNullOrBlank() && emotion != "neutral") ", $emotion" else ""
-            appendLine("Speaker: $speakerGender$moodPart")
+        if (!prevEnglish.isNullOrBlank()) {
+            val rolling = if (!prevHindi.isNullOrBlank()) " (said: ${prevHindi.take(40)})" else ""
+            appendLine("Prev line: \"${prevEnglish.take(50)}\"$rolling")
+        }
+        if (!nextEnglish.isNullOrBlank()) {
+            appendLine("Next line: \"${nextEnglish.take(45)}\"")
+        }
+        val spG = speakerGender?.takeIf { it.isNotBlank() && it != "NEUTRAL" }
+        val lsG = listenerGender?.takeIf { it.isNotBlank() && it != "NEUTRAL" }
+        if (spG != null || lsG != null || (!emotion.isNullOrBlank() && emotion != "neutral")) {
+            val spPart = spG ?: "UNKNOWN"
+            val lsPart = if (lsG != null) " talking to $lsG" else ""
+            val moodPart = if (!emotion.isNullOrBlank() && emotion != "neutral") " ($emotion)" else ""
+            appendLine("Speaker: $spPart$lsPart$moodPart")
+        }
+        if (asrMayHaveErrors) {
+            appendLine("Note: Audio transcript may have phonetic typos; infer intended movie dialogue from Scene Mood & context.")
         }
         append("Translate ONLY this English line into Hindi (Devanagari only):\nEnglish: \"$englishLine\"\nHindi:")
     }
@@ -405,7 +449,7 @@ class LocalGgufTranslator {
         )
         private val PROMPT_LEAK_PATTERNS = listOf(
             "translate only", "previous context", "local json slang", "do not translate",
-            "speaker:", "english:", "style:", "hindi:"
+            "scene mood:", "prev line:", "next line:", "speaker:", "english:", "style:", "hindi:"
         )
 
         private val FAST_SHORT_UTTERANCES = mapOf(
