@@ -212,15 +212,31 @@ class GeminiDubbingService {
     suspend fun translateToHindi(
         segments: List<DialogueSegmentEntity>,
         speakers: List<SpeakerEntity>,
-        dialogueStyle: String
+        dialogueStyle: String,
+        dictionaryConfig: SlangDictionaryConfig? = null
     ): List<TranslatedLine> = withContext(Dispatchers.IO) {
         val speechSegments = segments.filter { it.audioType == "SPEECH" && it.englishText.isNotBlank() }
         if (speechSegments.isEmpty()) return@withContext emptyList()
 
         val speakerMap = speakers.associateBy { it.speakerLabel }
         val inputJson = JSONArray()
-        speechSegments.forEach { seg ->
+        val matchesBySegId = mutableMapOf<Long, List<MatchedSlangRule>>()
+        speechSegments.forEachIndexed { idx, seg ->
             val sp = speakerMap[seg.speakerLabel]
+            val prevText = speechSegments.getOrNull(idx - 1)?.englishText.orEmpty()
+            val nextText = speechSegments.getOrNull(idx + 1)?.englishText.orEmpty()
+            val segMatches = if (dictionaryConfig != null) {
+                SlangDictionaryManager.resolveMatches(
+                    config = dictionaryConfig,
+                    englishText = seg.englishText,
+                    prevContext = prevText,
+                    nextContext = nextText,
+                    emotion = seg.emotion,
+                    dialogueStyle = dialogueStyle
+                )
+            } else emptyList()
+            matchesBySegId[seg.id] = segMatches
+
             inputJson.put(
                 JSONObject().apply {
                     put("segmentId", seg.id)
@@ -234,6 +250,7 @@ class GeminiDubbingService {
             )
         }
 
+        val glossarySection = SlangDictionaryManager.buildPromptGlossaryHints(matchesBySegId.values.flatten())
         val prompt = """
             You are an expert Bollywood/cinema Hindi dialogue writer.
             Translate EVERY English dialogue segment below into Hindi (Devanagari script).
@@ -243,7 +260,7 @@ class GeminiDubbingService {
             - Preserve original meaning, character personality, sarcasm/humor, and emotional tone.
             - Keep Hindi line length appropriate so it can be spoken naturally inside targetDurationMs.
             - Do NOT omit or merge any segmentId. Return one translation object per input segmentId.
-            
+            ${if (glossarySection.isNotBlank()) "\n$glossarySection\n" else ""}
             Segments JSON:
             $inputJson
         """.trimIndent()
@@ -253,7 +270,19 @@ class GeminiDubbingService {
                 translationModel.generateContent(prompt)
             }
             val jsonStr = response.text ?: throw GeminiApiException("Gemini returned empty translation.")
-            parseTranslationJson(jsonStr)
+            val rawParsed = parseTranslationJson(jsonStr)
+            val segById = speechSegments.associateBy { it.id }
+            rawParsed.map { line ->
+                val segMatches = matchesBySegId[line.segmentId].orEmpty()
+                val origEng = segById[line.segmentId]?.englishText.orEmpty()
+                line.copy(
+                    hindiText = SlangDictionaryManager.postProcessLlmOutput(
+                        llmHindi = line.hindiText,
+                        englishText = origEng,
+                        matches = segMatches
+                    )
+                )
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: TimeoutCancellationException) {

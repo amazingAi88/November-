@@ -84,13 +84,16 @@ object AudioChunkExtractor {
                     var outputDone = false
                     val startUs = startMs * 1000L
                     val endUs = endMs * 1000L
+                    var idleCycles = 0
 
                     while (!outputDone) {
                         coroutineContext.ensureActive()
+                        var madeProgress = false
 
                         if (!inputDone) {
                             val inIdx = codec.dequeueInputBuffer(10_000L)
                             if (inIdx >= 0) {
+                                madeProgress = true
                                 val inBuf = codec.getInputBuffer(inIdx)!!
                                 val sampleSize = extractor.readSampleData(inBuf, 0)
                                 val sampleTimeUs = extractor.sampleTime
@@ -112,6 +115,7 @@ object AudioChunkExtractor {
                         val outIdx = codec.dequeueOutputBuffer(bufferInfo, 10_000L)
                         when {
                             outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                                madeProgress = true
                                 val outFmt = codec.outputFormat
                                 if (outFmt.containsKey(MediaFormat.KEY_SAMPLE_RATE)) {
                                     codecSampleRate = outFmt.getInteger(MediaFormat.KEY_SAMPLE_RATE)
@@ -121,6 +125,7 @@ object AudioChunkExtractor {
                                 }
                             }
                             outIdx >= 0 -> {
+                                madeProgress = true
                                 val outBuf = codec.getOutputBuffer(outIdx)
                                 if (outBuf != null && bufferInfo.size > 0) {
                                     val ptsUs = bufferInfo.presentationTimeUs
@@ -189,6 +194,15 @@ object AudioChunkExtractor {
                                 if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
                                     outputDone = true
                                 }
+                            }
+                        }
+
+                        if (madeProgress) {
+                            idleCycles = 0
+                        } else {
+                            idleCycles++
+                            if (idleCycles > 1500) { // ~15s consecutive codec dequeue timeout
+                                throw IllegalStateException("Audio decoder stalled on malformed stream segment.")
                             }
                         }
                     }

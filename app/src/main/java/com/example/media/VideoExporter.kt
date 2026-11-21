@@ -28,6 +28,7 @@ import androidx.media3.transformer.ExportResult
 import androidx.media3.transformer.ProgressHolder
 import androidx.media3.transformer.Transformer
 import com.example.data.local.ExportQuality
+import com.example.data.local.MediaAccelMode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -66,6 +67,7 @@ object VideoExporter {
             setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
             setInteger(MediaFormat.KEY_BIT_RATE, 192_000)
             setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 65536)
+            setInteger(MediaFormat.KEY_PRIORITY, 0)
         }
 
         val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
@@ -235,6 +237,7 @@ object VideoExporter {
         durationMs: Long,
         quality: String,
         outputMp4File: File,
+        mediaAccelSettings: MediaAccelSettings = MediaAccelSettings(),
         onProgress: (Int, String) -> Unit
     ): File {
         val m4aTemp = File(outputMp4File.parentFile, "${outputMp4File.nameWithoutExtension}_audio.m4a")
@@ -264,16 +267,17 @@ object VideoExporter {
                     outputMp4File.delete()
                 }
                 if (!passthroughSucceeded) {
-                    onProgress(50, "Converting container to MP4 with Media3 Transformer...")
-                    exportWithMedia3Transformer(
+                    runTransformerWithSafeFallback(
                         context = context,
                         videoSourceUri = sourceUri,
                         audioM4aFile = m4aTemp,
                         targetHeight = null,
-                        outputMp4File = outputMp4File
-                    ) { p ->
-                        onProgress(50 + (p / 2), "Rendering Hindi dubbed MP4...")
-                    }
+                        outputMp4File = outputMp4File,
+                        mediaAccelSettings = mediaAccelSettings,
+                        initialStage = "Converting container to MP4 (${MediaAccelMode.displayLabel(mediaAccelSettings.mode)})...",
+                        renderStagePrefix = "Rendering Hindi dubbed MP4",
+                        onProgress = onProgress
+                    )
                 }
             } else {
                 val targetHeight: Int? = when (quality) {
@@ -284,16 +288,17 @@ object VideoExporter {
                     else -> 720
                 }
                 val label = if (targetHeight != null) "${targetHeight}p" else "Original Res"
-                onProgress(50, "Transcoding video ($label → MP4) with Media3 Transformer...")
-                exportWithMedia3Transformer(
+                runTransformerWithSafeFallback(
                     context = context,
                     videoSourceUri = sourceUri,
                     audioM4aFile = m4aTemp,
                     targetHeight = targetHeight,
-                    outputMp4File = outputMp4File
-                ) { p ->
-                    onProgress(50 + (p / 2), "Rendering $label Hindi dubbed MP4...")
-                }
+                    outputMp4File = outputMp4File,
+                    mediaAccelSettings = mediaAccelSettings,
+                    initialStage = "Transcoding video ($label • ${MediaAccelMode.displayLabel(mediaAccelSettings.mode)})...",
+                    renderStagePrefix = "Rendering $label Hindi dubbed MP4",
+                    onProgress = onProgress
+                )
             }
         } finally {
             m4aTemp.delete()
@@ -301,6 +306,56 @@ object VideoExporter {
 
         onProgress(100, "Export Complete")
         return outputMp4File
+    }
+
+    private suspend fun runTransformerWithSafeFallback(
+        context: Context,
+        videoSourceUri: Uri,
+        audioM4aFile: File,
+        targetHeight: Int?,
+        outputMp4File: File,
+        mediaAccelSettings: MediaAccelSettings,
+        initialStage: String,
+        renderStagePrefix: String,
+        onProgress: (Int, String) -> Unit
+    ) {
+        onProgress(50, initialStage)
+        try {
+            exportWithMedia3Transformer(
+                context = context,
+                videoSourceUri = videoSourceUri,
+                audioM4aFile = audioM4aFile,
+                targetHeight = targetHeight,
+                outputMp4File = outputMp4File,
+                mediaAccelSettings = mediaAccelSettings
+            ) { p ->
+                onProgress(50 + (p / 2), "$renderStagePrefix...")
+            }
+        } catch (err: Exception) {
+            val canRetrySoftware = mediaAccelSettings.allowCodecFallback &&
+                mediaAccelSettings.mode != MediaAccelMode.SOFTWARE_SAFE &&
+                err !is kotlinx.coroutines.CancellationException
+            if (!canRetrySoftware) throw err
+
+            outputMp4File.delete()
+            onProgress(50, "Hardware codec stalled — retrying with Media3 Software Safe mode...")
+            val safeSettings = mediaAccelSettings.copy(
+                mode = MediaAccelMode.SOFTWARE_SAFE,
+                asyncCodecQueueing = false,
+                highOperatingRate = false,
+                transformerMuxerTimeoutSec = maxOf(mediaAccelSettings.transformerMuxerTimeoutSec, 60)
+            )
+            exportWithMedia3Transformer(
+                context = context,
+                videoSourceUri = videoSourceUri,
+                audioM4aFile = audioM4aFile,
+                targetHeight = targetHeight,
+                outputMp4File = outputMp4File,
+                mediaAccelSettings = safeSettings
+            ) { p ->
+                onProgress(50 + (p / 2), "$renderStagePrefix (Software Fallback)...")
+            }
+        }
     }
 
     /**
@@ -417,6 +472,7 @@ object VideoExporter {
         audioM4aFile: File,
         targetHeight: Int?,
         outputMp4File: File,
+        mediaAccelSettings: MediaAccelSettings = MediaAccelSettings(),
         onProgress: (Int) -> Unit
     ) = withContext(Dispatchers.Main) {
         outputMp4File.delete()
@@ -460,11 +516,11 @@ object VideoExporter {
                 }
             }
 
-            val transformer = Transformer.Builder(context)
-                .setVideoMimeType(MimeTypes.VIDEO_H264)
-                .setAudioMimeType(MimeTypes.AUDIO_AAC)
-                .addListener(listener)
-                .build()
+            val transformer = Media3HardwareConfig.buildTransformer(
+                context = context,
+                settings = mediaAccelSettings,
+                listener = listener
+            )
 
             val holder = ProgressHolder()
             progressRunnable = object : Runnable {

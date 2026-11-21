@@ -99,6 +99,7 @@ fun DubbingSettingsScreen(
     viewModel: ProjectStudioViewModel,
     onBack: () -> Unit,
     onOpenSettings: () -> Unit = {},
+    onOpenSlangDictionary: () -> Unit = {},
     onNextAudioSettings: () -> Unit
 ) {
     val context = LocalContext.current
@@ -366,6 +367,16 @@ fun DubbingSettingsScreen(
                                         )
                                     )
                                 }
+                            }
+                            Spacer(modifier = Modifier.height(10.dp))
+                            OutlinedButton(
+                                onClick = onOpenSlangDictionary,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(48.dp)
+                                    .testTag("project_open_slang_dictionary_button")
+                            ) {
+                                Text("Customize Slang & Context JSON Dictionary")
                             }
                         }
                     }

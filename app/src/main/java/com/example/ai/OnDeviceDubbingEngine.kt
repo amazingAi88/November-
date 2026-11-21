@@ -8,10 +8,13 @@ import android.speech.tts.Voice as AndroidTtsVoice
 import android.util.Log
 import com.example.ai.OnDeviceModelManager.awaitTask
 import com.example.data.local.DialogueSegmentEntity
+import com.example.data.local.DialogueStyle
 import com.example.data.local.SpeakerEntity
 import com.example.media.AudioChunkExtractor
 import com.example.media.WavUtils
+import com.google.mlkit.common.model.RemoteModelManager
 import com.google.mlkit.nl.translate.TranslateLanguage
+import com.google.mlkit.nl.translate.TranslateRemoteModel
 import com.google.mlkit.nl.translate.Translation
 import com.google.mlkit.nl.translate.Translator
 import com.google.mlkit.nl.translate.TranslatorOptions
@@ -116,23 +119,43 @@ class OnDeviceDubbingEngine(private val context: Context) {
     }
 
     /**
-     * Translates English segments into Hindi using Google ML Kit On-Device Translation (~30 MB model, ₹0 free).
+     * Translates English segments into Hindi using Google ML Kit On-Device Translation (~30 MB model, ₹0 free),
+     * protected and overridden by the local JSON slang & context dictionary (`slang_override_dictionary.json`).
      */
     suspend fun translateToHindi(
-        segments: List<DialogueSegmentEntity>
+        segments: List<DialogueSegmentEntity>,
+        dialogueStyle: String = DialogueStyle.CONVERSATIONAL
     ): List<TranslatedLine> = withContext(Dispatchers.IO) {
         val speechSegments = segments.filter { it.audioType == "SPEECH" && it.englishText.isNotBlank() }
         if (speechSegments.isEmpty()) return@withContext emptyList()
 
-        val translator = getOrCreateTranslator()
+        val dictConfig = SlangDictionaryManager.loadConfig(context)
+        var translator: Translator? = null
         val results = mutableListOf<TranslatedLine>()
-        for (seg in speechSegments) {
-            val cleanedEnglish = normalizeEnglishForTranslation(seg.englishText)
-            val hindi = translator.translate(cleanedEnglish).awaitTask().trim()
+        for ((idx, seg) in speechSegments.withIndex()) {
+            val prevText = speechSegments.getOrNull(idx - 1)?.englishText.orEmpty()
+            val nextText = speechSegments.getOrNull(idx + 1)?.englishText.orEmpty()
+            val prep = SlangDictionaryManager.prepareProtectedText(
+                config = dictConfig,
+                englishText = seg.englishText,
+                prevContext = prevText,
+                nextContext = nextText,
+                emotion = seg.emotion,
+                dialogueStyle = dialogueStyle
+            )
+            val finalHindi = if (prep.directOverrideHindi != null) {
+                prep.directOverrideHindi
+            } else {
+                val mlKit = translator ?: getOrCreateTranslator().also { translator = it }
+                val cleanedEnglish = normalizeEnglishForTranslation(prep.protectedEnglish)
+                val rawHindi = mlKit.translate(cleanedEnglish).awaitTask().trim()
+                val overridden = SlangDictionaryManager.restoreAndOverride(rawHindi, prep)
+                overridden.ifBlank { cleanedEnglish }
+            }
             results.add(
                 TranslatedLine(
                     segmentId = seg.id,
-                    hindiText = hindi.ifBlank { cleanedEnglish },
+                    hindiText = finalHindi,
                     emotion = seg.emotion
                 )
             )
@@ -141,23 +164,42 @@ class OnDeviceDubbingEngine(private val context: Context) {
     }
 
     /**
-     * Context-aware offline cinema translation via local open-source GGUF model (Qwen / Gemma / Llama GGUF).
+     * Context-aware offline cinema translation via local open-source GGUF model (Qwen / Gemma / Llama GGUF),
+     * guided and enforced by the local JSON slang & context dictionary, with incremental callbacks and
+     * automatic ML Kit safety fallback if the GGUF model refuses or outputs non-Devanagari text.
      */
     suspend fun translateToHindiWithLocalLlm(
         segments: List<DialogueSegmentEntity>,
         speakers: List<SpeakerEntity>,
         dialogueStyle: String,
-        modelFile: File
+        modelFile: File,
+        onLineTranslated: (suspend (line: TranslatedLine, index: Int, total: Int) -> Unit)? = null
     ): List<TranslatedLine> = withContext(Dispatchers.IO) {
         // Free Vosk native buffers before mapping the GGUF weights on 4-6GB RAM phones
         runCatching { voskModel?.close() }
         voskModel = null
 
+        val dictConfig = SlangDictionaryManager.loadConfig(context)
+        val mlKitReady = runCatching {
+            val hindiModel = TranslateRemoteModel.Builder(TranslateLanguage.HINDI).build()
+            RemoteModelManager.getInstance().isModelDownloaded(hindiModel).awaitTask()
+        }.getOrDefault(false)
+
+        val fallback: (suspend (String) -> String)? = if (mlKitReady) {
+            { protectedEnglish ->
+                val tr = getOrCreateTranslator()
+                tr.translate(normalizeEnglishForTranslation(protectedEnglish)).awaitTask().trim()
+            }
+        } else null
+
         localGgufTranslator.translateSegmentsWithContext(
             modelFile = modelFile,
             segments = segments,
             speakers = speakers,
-            dialogueStyle = dialogueStyle
+            dialogueStyle = dialogueStyle,
+            dictionaryConfig = dictConfig,
+            fallbackTranslator = fallback,
+            onLineTranslated = onLineTranslated
         )
     }
 
@@ -381,8 +423,8 @@ class OnDeviceDubbingEngine(private val context: Context) {
         val wordsArr = root.optJSONArray("result")
         if (wordsArr == null || wordsArr.length() == 0) return
 
-        // Split long continuous Vosk blocks at natural pauses (>380ms) or every ~14 words
-        // so dubbed segments remain tightly synced to screen action.
+        // Split continuous Vosk speech only at genuine dialogue pauses (>750ms) or ~18 words
+        // so full sentences stay intact for accurate Hindi translation instead of tiny fragments.
         var phraseStartMs = -1L
         var lastEndMs = 0L
         val currentWords = mutableListOf<String>()
@@ -416,7 +458,7 @@ class OnDeviceDubbingEngine(private val context: Context) {
                 currentWords.add(w)
             } else {
                 val gapMs = wStartMs - lastEndMs
-                if (gapMs > 380L || currentWords.size >= 14) {
+                if (gapMs > 750L || currentWords.size >= 18) {
                     flushPhrase()
                     phraseStartMs = wStartMs
                 }

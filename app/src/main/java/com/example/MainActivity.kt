@@ -24,6 +24,7 @@ import com.example.ui.navigation.ImportMovieRoute
 import com.example.ui.navigation.ProcessingRoute
 import com.example.ui.navigation.ReviewRoute
 import com.example.ui.navigation.SettingsRoute
+import com.example.ui.navigation.SlangDictionaryRoute
 import com.example.ui.screens.AudioSettingsScreen
 import com.example.ui.screens.DubbingSettingsScreen
 import com.example.ui.screens.ExportScreen
@@ -32,6 +33,7 @@ import com.example.ui.screens.ImportMovieScreen
 import com.example.ui.screens.ProcessingScreen
 import com.example.ui.screens.ReviewScreen
 import com.example.ui.screens.SettingsScreen
+import com.example.ui.screens.SlangDictionaryScreen
 import com.example.ui.theme.HindiDubStudioTheme
 import com.example.ui.viewmodel.ProjectStudioViewModel
 
@@ -101,6 +103,7 @@ fun DubbingStudioNavHost() {
                 viewModel = vm,
                 onBack = { navController.popBackStack() },
                 onOpenSettings = { navController.navigate(SettingsRoute) },
+                onOpenSlangDictionary = { navController.navigate(SlangDictionaryRoute) },
                 onNextAudioSettings = {
                     navController.navigate(AudioSettingsRoute(route.projectId))
                 }
@@ -172,6 +175,13 @@ fun DubbingStudioNavHost() {
 
         composable<SettingsRoute> {
             SettingsScreen(
+                onBack = { navController.popBackStack() },
+                onOpenSlangDictionary = { navController.navigate(SlangDictionaryRoute) }
+            )
+        }
+
+        composable<SlangDictionaryRoute> {
+            SlangDictionaryScreen(
                 onBack = { navController.popBackStack() }
             )
         }

@@ -11,9 +11,14 @@ import com.example.ai.LocalLlmModelManager
 import com.example.ai.LocalLlmSampleResult
 import com.example.ai.OnDeviceModelManager
 import com.example.ai.OnDeviceModelsStatus
+import com.example.ai.SlangDictionaryConfig
+import com.example.ai.SlangDictionaryManager
+import com.example.ai.SlangOverrideRule
 import com.example.data.local.DubbingRepository
 import com.example.data.local.PreferencesRepository
 import com.example.data.local.StudioPreferences
+import com.example.media.Media3HardwareConfig
+import com.example.media.MediaCodecCapabilitiesSummary
 import com.example.media.WavUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -66,6 +71,12 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     private val _isTestingSample = MutableStateFlow(false)
     val isTestingSample: StateFlow<Boolean> = _isTestingSample.asStateFlow()
 
+    private val _slangConfig = MutableStateFlow(SlangDictionaryManager.ensureInitialized(application))
+    val slangConfig: StateFlow<SlangDictionaryConfig> = _slangConfig.asStateFlow()
+
+    private val _hardwareCodecs = MutableStateFlow<MediaCodecCapabilitiesSummary?>(null)
+    val hardwareCodecs: StateFlow<MediaCodecCapabilitiesSummary?> = _hardwareCodecs.asStateFlow()
+
     private val _message = MutableStateFlow<String?>(null)
     val message: StateFlow<String?> = _message.asStateFlow()
 
@@ -73,7 +84,95 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         refreshTempSize()
         refreshModelsStatus()
         refreshGgufModels()
+        refreshSlangDictionary()
+        refreshHardwareCodecs()
     }
+
+    fun refreshHardwareCodecs() {
+        viewModelScope.launch {
+            _hardwareCodecs.value = withContext(Dispatchers.IO) {
+                Media3HardwareConfig.inspectDeviceHardwareCodecs()
+            }
+        }
+    }
+
+    fun refreshSlangDictionary() {
+        viewModelScope.launch {
+            val loaded = withContext(Dispatchers.IO) {
+                SlangDictionaryManager.loadConfig(getApplication())
+            }
+            _slangConfig.value = loaded
+        }
+    }
+
+    fun setSlangDictionaryEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            val updated = withContext(Dispatchers.IO) {
+                SlangDictionaryManager.setDictionaryEnabled(getApplication(), enabled)
+            }
+            _slangConfig.value = updated
+            _message.value = if (enabled) "Slang JSON override enabled." else "Slang JSON override disabled."
+        }
+    }
+
+    fun upsertSlangRule(rule: SlangOverrideRule) {
+        viewModelScope.launch {
+            try {
+                val updated = withContext(Dispatchers.IO) {
+                    SlangDictionaryManager.upsertRule(getApplication(), rule)
+                }
+                _slangConfig.value = updated
+                _message.value = "Saved rule \"${rule.sourceTerm}\" → \"${rule.hindiReplacement}\"."
+            } catch (e: Exception) {
+                _message.value = e.localizedMessage ?: "Failed to save rule."
+            }
+        }
+    }
+
+    fun toggleSlangRule(ruleId: String, enabled: Boolean) {
+        viewModelScope.launch {
+            val updated = withContext(Dispatchers.IO) {
+                SlangDictionaryManager.toggleRuleEnabled(getApplication(), ruleId, enabled)
+            }
+            _slangConfig.value = updated
+        }
+    }
+
+    fun deleteSlangRule(ruleId: String) {
+        viewModelScope.launch {
+            val updated = withContext(Dispatchers.IO) {
+                SlangDictionaryManager.deleteRule(getApplication(), ruleId)
+            }
+            _slangConfig.value = updated
+            _message.value = "Removed rule from local JSON dictionary."
+        }
+    }
+
+    fun resetSlangDictionary() {
+        viewModelScope.launch {
+            val defaults = withContext(Dispatchers.IO) {
+                SlangDictionaryManager.resetToDefaults(getApplication())
+            }
+            _slangConfig.value = defaults
+            _message.value = "Reset local JSON dictionary to ${defaults.rules.size} default rules."
+        }
+    }
+
+    fun importRawSlangJson(rawJson: String) {
+        viewModelScope.launch {
+            try {
+                val parsed = withContext(Dispatchers.IO) {
+                    SlangDictionaryManager.importRawJson(getApplication(), rawJson)
+                }
+                _slangConfig.value = parsed
+                _message.value = "Updated JSON dictionary (${parsed.rules.size} rules)."
+            } catch (e: Exception) {
+                _message.value = "Invalid JSON format: ${e.localizedMessage ?: "parse error"}"
+            }
+        }
+    }
+
+    fun readRawSlangJson(): String = SlangDictionaryManager.readRawJson(getApplication())
 
     fun refreshTempSize() {
         viewModelScope.launch {
@@ -248,10 +347,14 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                     )
                 } ?: throw IllegalStateException("Please download or import a .gguf model first.")
 
+                val dictCfg = withContext(Dispatchers.IO) {
+                    SlangDictionaryManager.loadConfig(getApplication())
+                }
                 val result = localGgufTranslator.translateSingleSample(
                     modelFile = activeFile,
                     englishLine = cleanInput,
-                    dialogueStyle = dialogueStyle
+                    dialogueStyle = dialogueStyle,
+                    dictionaryConfig = dictCfg
                 )
                 _sampleTestOutput.value = result
             } catch (e: Exception) {
@@ -269,6 +372,11 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     fun setPreserveBgm(preserve: Boolean) = viewModelScope.launch { preferencesRepository.setPreserveBgm(preserve) }
     fun setExportQuality(quality: String) = viewModelScope.launch { preferencesRepository.setExportQuality(quality) }
     fun setAutoCleanup(enabled: Boolean) = viewModelScope.launch { preferencesRepository.setAutoCleanup(enabled) }
+    fun setMediaAccelMode(mode: String) = viewModelScope.launch { preferencesRepository.setMediaAccelMode(mode) }
+    fun setMediaAsyncCodecQueueing(enabled: Boolean) = viewModelScope.launch { preferencesRepository.setMediaAsyncCodecQueueing(enabled) }
+    fun setMediaHighOperatingRate(enabled: Boolean) = viewModelScope.launch { preferencesRepository.setMediaHighOperatingRate(enabled) }
+    fun setMediaAllowCodecFallback(enabled: Boolean) = viewModelScope.launch { preferencesRepository.setMediaAllowCodecFallback(enabled) }
+    fun setMediaTransformerTimeoutSec(seconds: Int) = viewModelScope.launch { preferencesRepository.setMediaTransformerTimeoutSec(seconds) }
 
     fun cleanAllTempFiles() {
         viewModelScope.launch {

@@ -46,8 +46,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
+import com.example.media.Media3HardwareConfig
+import com.example.media.MediaAccelSettings
 import com.example.ui.theme.ElectricCyan
 import com.example.ui.theme.EmeraldContainer
 import com.example.ui.theme.EmeraldSuccess
@@ -230,11 +231,12 @@ fun StepHeaderRow(
 @Composable
 fun ExoVideoPreviewPlayer(
     mediaUri: Uri,
+    mediaAccelSettings: MediaAccelSettings = MediaAccelSettings(),
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    val exoPlayer = remember(mediaUri) {
-        ExoPlayer.Builder(context).build().apply {
+    val exoPlayer = remember(mediaUri, mediaAccelSettings) {
+        Media3HardwareConfig.buildExoPlayer(context, mediaAccelSettings).apply {
             setMediaItem(MediaItem.fromUri(mediaUri))
             prepare()
         }

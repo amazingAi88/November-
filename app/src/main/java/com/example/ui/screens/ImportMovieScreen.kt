@@ -68,6 +68,7 @@ fun ImportMovieScreen(
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val availableBytes by viewModel.availableStorageBytes.collectAsStateWithLifecycle()
+    val mediaAccelSettings by viewModel.mediaAccelSettings.collectAsStateWithLifecycle()
 
     val videoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -215,7 +216,10 @@ fun ImportMovieScreen(
                             (state.chunkDurationSec * 1000L)).coerceAtLeast(1)
 
                         item {
-                            ExoVideoPreviewPlayer(mediaUri = movie.uri)
+                            ExoVideoPreviewPlayer(
+                                mediaUri = movie.uri,
+                                mediaAccelSettings = mediaAccelSettings
+                            )
                         }
 
                         item {

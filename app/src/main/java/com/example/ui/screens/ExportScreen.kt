@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.CleaningServices
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.MovieCreation
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -42,6 +43,8 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -55,6 +58,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.local.ExportQuality
+import com.example.data.local.MediaAccelMode
 import com.example.media.WavUtils
 import com.example.ui.components.ExoVideoPreviewPlayer
 import com.example.ui.components.StatusPill
@@ -83,6 +87,7 @@ fun ExportScreen(
     val project by viewModel.project.collectAsStateWithLifecycle()
     val exportState by viewModel.exportState.collectAsStateWithLifecycle()
     val tempBytes by viewModel.tempBytes.collectAsStateWithLifecycle()
+    val mediaAccelSettings by viewModel.mediaAccelSettings.collectAsStateWithLifecycle()
     val banner by viewModel.statusBanner.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -175,6 +180,84 @@ fun ExportScreen(
                                         modifier = Modifier.testTag("export_quality_$q")
                                     )
                                 }
+                            }
+                        }
+                    }
+                }
+
+                // Media3 Transformer & ExoPlayer Hardware Acceleration Card
+                item {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("export_media3_accel_card"),
+                        colors = CardDefaults.cardColors(containerColor = ObsidianSurface),
+                        border = BorderStroke(1.dp, ElectricCyan.copy(alpha = 0.45f)),
+                        shape = MaterialTheme.shapes.large
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Icon(Icons.Filled.Speed, contentDescription = null, tint = ElectricCyan)
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text("Media3 Hardware Acceleration", style = MaterialTheme.typography.titleMedium)
+                                }
+                                StatusPill(
+                                    label = MediaAccelMode.displayLabel(mediaAccelSettings.mode),
+                                    tone = if (mediaAccelSettings.mode == MediaAccelMode.HARDWARE_PRIORITY) "ACTIVE" else "NEUTRAL"
+                                )
+                            }
+                            Text(
+                                text = mediaAccelSettings.summaryBadge(),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = ElectricCyan
+                            )
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                MediaAccelMode.all.forEach { mode ->
+                                    FilterChip(
+                                        selected = mediaAccelSettings.mode == mode,
+                                        onClick = { viewModel.updateMediaAccelMode(mode) },
+                                        label = { Text(MediaAccelMode.displayLabel(mode)) },
+                                        colors = FilterChipDefaults.filterChipColors(
+                                            selectedContainerColor = SaffronContainer,
+                                            selectedLabelColor = SaffronGold
+                                        ),
+                                        modifier = Modifier.testTag("export_accel_mode_$mode")
+                                    )
+                                }
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text("Async MediaCodec Queueing", style = MaterialTheme.typography.bodyMedium)
+                                    Text(
+                                        "Prevents dropped frames & preview stutters during heavy dubbing tasks",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Switch(
+                                    checked = mediaAccelSettings.asyncCodecQueueing,
+                                    onCheckedChange = { viewModel.updateMediaAsyncQueueing(it) },
+                                    colors = SwitchDefaults.colors(checkedThumbColor = SaffronGold),
+                                    modifier = Modifier.testTag("export_async_codec_switch")
+                                )
                             }
                         }
                     }
@@ -277,7 +360,10 @@ fun ExportScreen(
                                     )
                                 }
 
-                                ExoVideoPreviewPlayer(mediaUri = Uri.fromFile(existingExportFile))
+                                ExoVideoPreviewPlayer(
+                                    mediaUri = Uri.fromFile(existingExportFile),
+                                    mediaAccelSettings = mediaAccelSettings
+                                )
 
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),

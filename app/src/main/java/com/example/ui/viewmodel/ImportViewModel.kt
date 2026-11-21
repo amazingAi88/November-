@@ -10,11 +10,15 @@ import com.example.data.local.MovieProjectEntity
 import com.example.data.local.PreferencesRepository
 import com.example.data.local.SeparationMode
 import com.example.media.InspectedMovie
+import com.example.media.MediaAccelSettings
 import com.example.media.MediaInspector
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -31,6 +35,10 @@ sealed interface ImportUiState {
 class ImportViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = DubbingRepository(application)
     private val preferencesRepository = PreferencesRepository(application)
+
+    val mediaAccelSettings: StateFlow<MediaAccelSettings> = preferencesRepository.preferencesFlow
+        .map { MediaAccelSettings.fromPreferences(it) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), MediaAccelSettings())
 
     private val _uiState = MutableStateFlow<ImportUiState>(ImportUiState.Idle)
     val uiState: StateFlow<ImportUiState> = _uiState.asStateFlow()

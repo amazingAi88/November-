@@ -227,4 +227,29 @@ class AudioPipelineTest {
         assertTrue(EngineMode.ON_DEVICE_LLM in EngineMode.all)
         assertTrue(DialogueStyle.RAW_UNCENSORED in DialogueStyle.all)
     }
+
+    @Test
+    fun `LocalGgufTranslator strips think blocks, English preambles, and detects refusals`() {
+        val withThinkAndPrefix = """
+            <think>Let me translate this colloquial movie line carefully.</think>
+            Sure, here is the translation:
+            Hindi: "यहाँ से दफ़ा हो जाओ!"
+        """.trimIndent()
+        assertEquals(
+            "यहाँ से दफ़ा हो जाओ!",
+            com.example.ai.LocalGgufTranslator.extractBestHindiLine(withThinkAndPrefix)
+        )
+
+        assertTrue(com.example.ai.LocalGgufTranslator.isRefusalOrMissingHindi("I cannot translate explicit content."))
+        assertTrue(com.example.ai.LocalGgufTranslator.isRefusalOrMissingHindi("Yahan se dafa ho jao"))
+        assertFalse(com.example.ai.LocalGgufTranslator.isRefusalOrMissingHindi("यहाँ से दफ़ा हो जाओ!"))
+    }
+
+    @Test
+    fun `LocalGgufTranslator fast short-utterance mapper translates fillers with punctuation`() {
+        assertEquals("हाँ!", com.example.ai.LocalGgufTranslator.tryFastShortUtteranceHindi("Yeah!"))
+        assertEquals("रुको", com.example.ai.LocalGgufTranslator.tryFastShortUtteranceHindi("Wait..."))
+        assertEquals("बकवास बंद कर!", com.example.ai.LocalGgufTranslator.tryFastShortUtteranceHindi("Shut up!"))
+        assertEquals(null, com.example.ai.LocalGgufTranslator.tryFastShortUtteranceHindi("Give me the keys right now"))
+    }
 }

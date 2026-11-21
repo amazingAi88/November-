@@ -25,3 +25,6 @@ data class ExportRoute(val projectId: Long)
 
 @Serializable
 data object SettingsRoute
+
+@Serializable
+data object SlangDictionaryRoute

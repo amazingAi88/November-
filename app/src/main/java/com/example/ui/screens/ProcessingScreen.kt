@@ -165,6 +165,7 @@ fun ProcessingScreen(
             val failedChunks = chunks.count { it.status == ChunkStatus.FAILED }
 
             val speechSegs = segments.filter { it.audioType == "SPEECH" }
+            val translatedSegs = speechSegs.count { it.hindiText.isNotBlank() }
             val completedSegs = speechSegs.count { it.status == SegmentStatus.TTS_DONE }
             val failedSegs = speechSegs.count { it.status == SegmentStatus.FAILED }
             val pendingSegs = (speechSegs.size - completedSegs - failedSegs).coerceAtLeast(0)
@@ -321,6 +322,8 @@ fun ProcessingScreen(
                                 isReady -> "All chunks processed."
                                 currentProject.estimatedRemainingMs != null ->
                                     "Est. remaining: ~${WavUtils.formatTimecode(currentProject.estimatedRemainingMs)}"
+                                isRunning && speechSegs.isNotEmpty() ->
+                                    "Translated: $translatedSegs/${speechSegs.size} lines • Voice dubbed: $completedSegs/${speechSegs.size}"
                                 isRunning -> "Processing chunk — calculating remaining time after first completed chunk..."
                                 else -> "Paused — resume anytime from last saved checkpoint."
                             }
@@ -506,16 +509,18 @@ fun ProcessingScreen(
 
                 // Privacy & Quota / Engine reminder
                 item {
-                    if (currentProject.engineMode == EngineMode.ON_DEVICE_FREE ||
-                        currentProject.engineMode == EngineMode.ON_DEVICE_LLM
-                    ) {
-                        StudioDisclosureCard(
+                    when (currentProject.engineMode) {
+                        EngineMode.ON_DEVICE_FREE -> StudioDisclosureCard(
                             title = stringResource(R.string.privacy_notice_title),
                             body = stringResource(R.string.privacy_notice_body),
                             isWarning = false
                         )
-                    } else {
-                        StudioDisclosureCard(
+                        EngineMode.ON_DEVICE_LLM -> StudioDisclosureCard(
+                            title = "Local GGUF LLM (100% Offline & Uncensored)",
+                            body = "Translating dialogue directly on your phone CPU using your active .gguf model + local JSON slang dictionary. Progress is checkpointed after every line so you can Pause/Resume anytime without losing work.",
+                            isWarning = false
+                        )
+                        else -> StudioDisclosureCard(
                             title = stringResource(R.string.quota_notice_title),
                             body = stringResource(R.string.quota_notice_body),
                             isWarning = true
@@ -720,8 +725,15 @@ private fun ChunkRowCard(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     } else if (isActivelyProcessing) {
+                        val activeDetail = when (chunk.status) {
+                            ChunkStatus.EXTRACTED -> "Currently transcribing English audio..."
+                            ChunkStatus.TRANSCRIBED -> "Currently translating dialogue to Hindi..."
+                            ChunkStatus.TRANSLATED -> "Currently generating Hindi voices..."
+                            ChunkStatus.TTS_DONE -> "Separating BGM & mixing dubbed audio..."
+                            else -> "Currently extracting movie audio..."
+                        }
                         Text(
-                            text = "Currently extracting & transcribing...",
+                            text = activeDetail,
                             style = MaterialTheme.typography.bodySmall,
                             color = SaffronGold
                         )

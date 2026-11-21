@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Book
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CleaningServices
 import androidx.compose.material.icons.filled.CloudDownload
@@ -31,6 +32,7 @@ import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Security
 import androidx.compose.material3.Button
@@ -74,9 +76,11 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.R
 import com.example.ai.LocalLlmModelManager
 import com.example.ai.OnDeviceModelManager
+import com.example.ai.SlangDictionaryManager
 import com.example.data.local.DialogueStyle
 import com.example.data.local.EngineMode
 import com.example.data.local.ExportQuality
+import com.example.data.local.MediaAccelMode
 import com.example.media.WavUtils
 import com.example.ui.components.StatusPill
 import com.example.ui.components.StudioDisclosureCard
@@ -99,6 +103,7 @@ import java.util.Locale
 @Composable
 fun SettingsScreen(
     onBack: () -> Unit,
+    onOpenSlangDictionary: () -> Unit = {},
     viewModel: SettingsViewModel = viewModel()
 ) {
     val context = LocalContext.current
@@ -115,6 +120,8 @@ fun SettingsScreen(
     val ggufProgressText by viewModel.ggufProgressText.collectAsStateWithLifecycle()
     val sampleTestOutput by viewModel.sampleTestOutput.collectAsStateWithLifecycle()
     val isTestingSample by viewModel.isTestingSample.collectAsStateWithLifecycle()
+    val slangConfig by viewModel.slangConfig.collectAsStateWithLifecycle()
+    val hardwareCodecs by viewModel.hardwareCodecs.collectAsStateWithLifecycle()
 
     val message by viewModel.message.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -132,6 +139,7 @@ fun SettingsScreen(
         viewModel.refreshTempSize()
         viewModel.refreshModelsStatus()
         viewModel.refreshGgufModels()
+        viewModel.refreshSlangDictionary()
     }
 
     LaunchedEffect(message) {
@@ -288,6 +296,198 @@ fun SettingsScreen(
                                             selectedContainerColor = SaffronContainer,
                                             selectedLabelColor = SaffronGold
                                         )
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Media3 Hardware Acceleration Card (Transformer & ExoPlayer)
+                item {
+                    val codecs = hardwareCodecs
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("settings_media3_accel_card"),
+                        colors = CardDefaults.cardColors(containerColor = ObsidianSurface),
+                        border = BorderStroke(1.dp, ElectricCyan.copy(alpha = 0.5f)),
+                        shape = MaterialTheme.shapes.large
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Filled.Speed,
+                                        contentDescription = null,
+                                        tint = ElectricCyan
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Column {
+                                        Text(
+                                            "Media3 Hardware Acceleration",
+                                            style = MaterialTheme.typography.titleMedium
+                                        )
+                                        Text(
+                                            "Transformer transcode speed & ExoPlayer async queueing",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                                StatusPill(
+                                    label = if (codecs?.hasHardwareAcceleration == true) "HW READY" else "AUTO",
+                                    tone = if (codecs?.hasHardwareAcceleration == true) "SUCCESS" else "ACTIVE"
+                                )
+                            }
+
+                            if (codecs != null) {
+                                Surface(
+                                    color = ObsidianElevated,
+                                    shape = RoundedCornerShape(10.dp),
+                                    border = BorderStroke(1.dp, ObsidianBorder)
+                                ) {
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(12.dp),
+                                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        Text(
+                                            text = "Detected Hardware Codecs: ${codecs.hwVideoDecoderCount} HW Decoders • ${codecs.hwVideoEncoderCount} HW Encoders",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = ElectricCyan
+                                        )
+                                        if (!codecs.primaryHwVideoDecoder.isNullOrBlank() || !codecs.primaryHwVideoEncoder.isNullOrBlank()) {
+                                            Text(
+                                                text = "Decoder: ${codecs.primaryHwVideoDecoder ?: "N/A"} • Encoder: ${codecs.primaryHwVideoEncoder ?: "N/A"}",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            Text("Codec Acceleration Profile", style = MaterialTheme.typography.titleSmall)
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                MediaAccelMode.all.forEach { mode ->
+                                    FilterChip(
+                                        selected = prefs.mediaAccelMode == mode,
+                                        onClick = { viewModel.setMediaAccelMode(mode) },
+                                        label = { Text(MediaAccelMode.displayLabel(mode)) },
+                                        colors = FilterChipDefaults.filterChipColors(
+                                            selectedContainerColor = SaffronContainer,
+                                            selectedLabelColor = SaffronGold
+                                        ),
+                                        modifier = Modifier.testTag("settings_accel_mode_$mode")
+                                    )
+                                }
+                            }
+                            Text(
+                                text = when (prefs.mediaAccelMode) {
+                                    MediaAccelMode.HARDWARE_PRIORITY ->
+                                        "Forces hardware-accelerated MediaCodec encoders/decoders first with max priority clock for fastest MP4 exports."
+                                    MediaAccelMode.SOFTWARE_SAFE ->
+                                        "Prioritizes software codecs to bypass buggy OEM hardware encoders when a long video stalls or renders green frames."
+                                    else ->
+                                        "Uses Android Media3 default codec negotiation."
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text("Async MediaCodec Queueing", style = MaterialTheme.typography.bodyMedium)
+                                    Text(
+                                        "Enables ExoPlayer async buffers & Transformer dynamic scheduling",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Switch(
+                                    checked = prefs.mediaAsyncCodecQueueing,
+                                    onCheckedChange = { viewModel.setMediaAsyncCodecQueueing(it) },
+                                    colors = SwitchDefaults.colors(checkedThumbColor = SaffronGold),
+                                    modifier = Modifier.testTag("settings_async_codec_switch")
+                                )
+                            }
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text("Max Hardware Operating Rate", style = MaterialTheme.typography.bodyMedium)
+                                    Text(
+                                        "Boosts decoder/encoder clock rate hints during Transformer export",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Switch(
+                                    checked = prefs.mediaHighOperatingRate,
+                                    onCheckedChange = { viewModel.setMediaHighOperatingRate(it) },
+                                    colors = SwitchDefaults.colors(checkedThumbColor = SaffronGold),
+                                    modifier = Modifier.testTag("settings_operating_rate_switch")
+                                )
+                            }
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text("Auto Software Codec Fallback", style = MaterialTheme.typography.bodyMedium)
+                                    Text(
+                                        "Automatically retries with Software Safe codecs if hardware stalls",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Switch(
+                                    checked = prefs.mediaAllowCodecFallback,
+                                    onCheckedChange = { viewModel.setMediaAllowCodecFallback(it) },
+                                    colors = SwitchDefaults.colors(checkedThumbColor = SaffronGold),
+                                    modifier = Modifier.testTag("settings_codec_fallback_switch")
+                                )
+                            }
+
+                            Text("Transformer Muxer Stall Guard Timeout", style = MaterialTheme.typography.titleSmall)
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                listOf(15 to "15s", 30 to "30s", 60 to "60s", 0 to "No Limit").forEach { (sec, label) ->
+                                    FilterChip(
+                                        selected = prefs.mediaTransformerTimeoutSec == sec,
+                                        onClick = { viewModel.setMediaTransformerTimeoutSec(sec) },
+                                        label = { Text(label) },
+                                        colors = FilterChipDefaults.filterChipColors(
+                                            selectedContainerColor = SaffronContainer,
+                                            selectedLabelColor = SaffronGold
+                                        ),
+                                        modifier = Modifier.testTag("settings_muxer_timeout_$sec")
                                     )
                                 }
                             }
@@ -655,6 +855,82 @@ fun SettingsScreen(
                                             )
                                         }
                                     }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Local JSON Slang & Context Dictionary Card
+                item {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("slang_dictionary_settings_card"),
+                        colors = CardDefaults.cardColors(containerColor = ObsidianSurface),
+                        border = BorderStroke(1.dp, SaffronGold.copy(alpha = 0.55f)),
+                        shape = MaterialTheme.shapes.large
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Icon(Icons.Filled.Book, contentDescription = null, tint = SaffronGold)
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Column {
+                                        Text(
+                                            "Slang & Context JSON Dictionary",
+                                            style = MaterialTheme.typography.titleMedium
+                                        )
+                                        Text(
+                                            "${slangConfig.rules.count { it.enabled }} active / ${slangConfig.rules.size} total rules in ${SlangDictionaryManager.DICTIONARY_FILE_NAME}",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                                Switch(
+                                    checked = slangConfig.enabled,
+                                    onCheckedChange = { viewModel.setSlangDictionaryEnabled(it) },
+                                    colors = SwitchDefaults.colors(checkedThumbColor = SaffronGold)
+                                )
+                            }
+                            Text(
+                                text = "Defines slang, colloquialisms & scene-context Hindi translations in private internal storage to override censored ML Kit words and enforce authentic terms in LLMs.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Button(
+                                    onClick = onOpenSlangDictionary,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(48.dp)
+                                        .testTag("open_slang_dictionary_button"),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = SaffronGold,
+                                        contentColor = MaterialTheme.colorScheme.onPrimary
+                                    )
+                                ) {
+                                    Text("Open JSON Dictionary")
+                                }
+                                OutlinedButton(
+                                    onClick = { viewModel.resetSlangDictionary() },
+                                    modifier = Modifier.height(48.dp)
+                                ) {
+                                    Text("Reset")
                                 }
                             }
                         }

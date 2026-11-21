@@ -28,6 +28,7 @@ import com.example.media.AudioChunkExtractor
 import com.example.media.AudioMixer
 import com.example.media.AudioPlaybackState
 import com.example.media.AudioSeparator
+import com.example.media.MediaAccelSettings
 import com.example.media.PcmPreviewPlayer
 import com.example.media.VideoExporter
 import com.example.worker.DubbingWorkScheduler
@@ -38,6 +39,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -87,6 +89,10 @@ class ProjectStudioViewModel(
 
     val segments: StateFlow<List<DialogueSegmentEntity>> = repository.observeSegments(projectId)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val mediaAccelSettings: StateFlow<MediaAccelSettings> = preferencesRepository.preferencesFlow
+        .map { MediaAccelSettings.fromPreferences(it) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), MediaAccelSettings())
 
     val playbackState: StateFlow<AudioPlaybackState> = previewPlayer.state
 
@@ -706,7 +712,19 @@ class ProjectStudioViewModel(
         previewPlayer.playWav(file, "seg_tts_${segment.id}")
     }
 
-    // --- Export ---
+    // --- Export & Media3 Hardware Acceleration ---
+    fun updateMediaAccelMode(mode: String) {
+        viewModelScope.launch {
+            preferencesRepository.setMediaAccelMode(mode)
+        }
+    }
+
+    fun updateMediaAsyncQueueing(enabled: Boolean) {
+        viewModelScope.launch {
+            preferencesRepository.setMediaAsyncCodecQueueing(enabled)
+        }
+    }
+
     fun updateExportQuality(quality: String) {
         viewModelScope.launch {
             val proj = repository.getProject(projectId) ?: return@launch
@@ -730,6 +748,7 @@ class ProjectStudioViewModel(
 
             val safeTitle = proj.title.replace(Regex("[^A-Za-z0-9_\\-]"), "_").take(36)
             val outMp4 = File(repository.exportsDir(), "${safeTitle}_HindiDub_${proj.id}.mp4")
+            val accelSettings = MediaAccelSettings.fromPreferences(preferencesRepository.preferencesFlow.first())
             _exportState.value = ExportUiState.Exporting(2, "Starting MP4 export...")
 
             try {
@@ -739,7 +758,8 @@ class ProjectStudioViewModel(
                     mixedChunkWavs = mixedWavs,
                     durationMs = proj.durationMs,
                     quality = proj.exportQuality,
-                    outputMp4File = outMp4
+                    outputMp4File = outMp4,
+                    mediaAccelSettings = accelSettings
                 ) { pct, stage ->
                     _exportState.value = ExportUiState.Exporting(pct, stage)
                 }

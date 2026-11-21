@@ -17,6 +17,7 @@ import com.example.ai.GeminiApiException
 import com.example.ai.GeminiDubbingService
 import com.example.ai.HindiVoicePresets
 import com.example.ai.OnDeviceDubbingEngine
+import com.example.ai.SlangDictionaryManager
 import com.example.data.local.ChunkEntity
 import com.example.data.local.ChunkStatus
 import com.example.data.local.DialogueSegmentEntity
@@ -101,6 +102,24 @@ class DubbingWorker(
                 progress = latest?.progressPercent ?: 0,
                 etaMs = null,
                 error = e.localizedMessage ?: "Processing failed"
+            )
+            Result.failure()
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            Log.e(TAG, "DubbingWorker fatal/memory error for project $projectId", t)
+            val latest = repository.getProject(projectId)
+            val friendlyMsg = if (t is OutOfMemoryError) {
+                "Phone ran out of RAM loading the local LLM. Switch to Qwen 2.5 0.5B Lite or close background apps."
+            } else {
+                t.localizedMessage ?: "Unexpected native processing error"
+            }
+            repository.updateProjectProgress(
+                projectId = projectId,
+                status = ProjectStatus.ERROR,
+                stage = latest?.currentStage ?: ProcessingStage.IDLE,
+                progress = latest?.progressPercent ?: 0,
+                etaMs = null,
+                error = friendlyMsg
             )
             Result.failure()
         } finally {
@@ -333,15 +352,18 @@ class DubbingWorker(
                 project = repository.getProject(projectId) ?: project
                 val speakers = repository.getSpeakers(projectId)
                 if (untranslated.isNotEmpty()) {
+                    val untranslatedById = untranslated.associateBy { it.id }
+                    val alreadySavedIds = mutableSetOf<Long>()
                     val translations = when {
                         useLocalLlm && activeGgufFile != null -> {
+                            val totalToTranslate = untranslated.size.coerceAtLeast(1)
                             updateStage(
                                 projectId = projectId,
                                 title = project.title,
-                                stage = "Local GGUF LLM Translating (${chunk.chunkIndex + 1}/$totalChunks)",
+                                stage = "Local GGUF Translating (0/$totalToTranslate • Chunk ${chunk.chunkIndex + 1}/$totalChunks)",
                                 chunkIndex = chunk.chunkIndex,
                                 totalChunks = totalChunks,
-                                subStepFraction = 0.48f,
+                                subStepFraction = 0.34f,
                                 completedTimes = completedChunkTimes,
                                 useMediaProcessingType = true
                             )
@@ -350,19 +372,52 @@ class DubbingWorker(
                                 speakers = speakers,
                                 dialogueStyle = project.dialogueStyle,
                                 modelFile = activeGgufFile
-                            )
+                            ) { trLine, idx, totalLines ->
+                                val origSeg = untranslatedById[trLine.segmentId]
+                                if (origSeg != null && trLine.hindiText.isNotBlank()) {
+                                    repository.updateSegment(
+                                        origSeg.copy(
+                                            hindiText = trLine.hindiText,
+                                            emotion = trLine.emotion.ifBlank { origSeg.emotion },
+                                            status = SegmentStatus.TRANSLATED,
+                                            errorMessage = null
+                                        )
+                                    )
+                                    alreadySavedIds.add(origSeg.id)
+                                }
+                                val doneCount = (idx + 1).coerceAtMost(totalLines)
+                                val stepFrac = 0.34f + (0.20f * (doneCount.toFloat() / totalLines.coerceAtLeast(1)))
+                                updateStage(
+                                    projectId = projectId,
+                                    title = project.title,
+                                    stage = "Local GGUF Translating ($doneCount/$totalLines • Chunk ${chunk.chunkIndex + 1}/$totalChunks)",
+                                    chunkIndex = chunk.chunkIndex,
+                                    totalChunks = totalChunks,
+                                    subStepFraction = stepFrac,
+                                    completedTimes = completedChunkTimes,
+                                    useMediaProcessingType = true
+                                )
+                                if (shouldStopOrPause(projectId)) {
+                                    throw CancellationException("Paused during Local GGUF translation")
+                                }
+                            }
                         }
-                        useOnDevice -> onDeviceEngine.translateToHindi(untranslated)
+                        useOnDevice -> onDeviceEngine.translateToHindi(
+                            segments = untranslated,
+                            dialogueStyle = project.dialogueStyle
+                        )
                         else -> callWithRateLimitRetry {
                             aiService.translateToHindi(
                                 segments = untranslated,
                                 speakers = speakers,
-                                dialogueStyle = project.dialogueStyle
+                                dialogueStyle = project.dialogueStyle,
+                                dictionaryConfig = SlangDictionaryManager.loadConfig(applicationContext)
                             )
                         }
                     }
                     val translatedById = translations.associateBy { it.segmentId }
                     for (seg in untranslated) {
+                        if (seg.id in alreadySavedIds) continue
                         val tr = translatedById[seg.id]
                         if (tr != null && tr.hindiText.isNotBlank()) {
                             repository.updateSegment(
