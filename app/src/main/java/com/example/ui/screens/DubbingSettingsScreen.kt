@@ -70,6 +70,7 @@ import com.example.ai.HindiVoicePresets
 import com.example.ai.OnDeviceModelManager
 import com.example.ai.VoicePreset
 import com.example.data.local.DialogueStyle
+import com.example.data.local.DubbingSpeedMode
 import com.example.data.local.EngineMode
 import com.example.data.local.SpeakerEntity
 import com.example.media.AudioPlaybackState
@@ -108,6 +109,7 @@ fun DubbingSettingsScreen(
     val playbackState by viewModel.playbackState.collectAsStateWithLifecycle()
     val voicePreviewState by viewModel.voicePreviewState.collectAsStateWithLifecycle()
     val activeGgufModelName by viewModel.activeGgufModelName.collectAsStateWithLifecycle()
+    val dubbingSpeedMode by viewModel.dubbingSpeedMode.collectAsStateWithLifecycle()
     val banner by viewModel.statusBanner.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -300,6 +302,36 @@ fun DubbingSettingsScreen(
                                                 }
                                             )
                                         }
+                                        Text(
+                                            text = "Speed Mode",
+                                            style = MaterialTheme.typography.labelLarge
+                                        )
+                                        FlowRow(
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            DubbingSpeedMode.all.forEach { mode ->
+                                                FilterChip(
+                                                    selected = dubbingSpeedMode == mode,
+                                                    onClick = { viewModel.updateDubbingSpeedMode(mode) },
+                                                    label = { Text(DubbingSpeedMode.displayLabel(mode)) },
+                                                    colors = FilterChipDefaults.filterChipColors(
+                                                        selectedContainerColor = SaffronContainer,
+                                                        selectedLabelColor = SaffronGold
+                                                    ),
+                                                    modifier = Modifier.testTag("project_speed_mode_$mode")
+                                                )
+                                            }
+                                        }
+                                        Text(
+                                            text = if (dubbingSpeedMode == DubbingSpeedMode.HYBRID_TURBO) {
+                                                "Hybrid Turbo translates clean lines in ~10 ms via ML Kit and routes slang, bold/adult & complex lines to Local GGUF."
+                                            } else {
+                                                "Full GGUF processes every dialogue line on the local LLM."
+                                            },
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
                                     }
                                 }
                             }

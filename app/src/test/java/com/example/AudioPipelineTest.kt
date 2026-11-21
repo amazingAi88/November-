@@ -1,10 +1,12 @@
 package com.example
 
+import com.example.ai.LocalGgufTranslator
 import com.example.ai.LocalLlmModelManager
 import com.example.ai.OnDeviceSpeakerAnalyzer
 import com.example.data.local.DialogueSegmentEntity
 import com.example.data.local.DialogueStyle
 import com.example.data.local.EngineMode
+import com.example.media.AudioChunkExtractor
 import com.example.media.AudioMixer
 import com.example.media.AudioSeparator
 import com.example.media.MediaInspector
@@ -247,9 +249,115 @@ class AudioPipelineTest {
 
     @Test
     fun `LocalGgufTranslator fast short-utterance mapper translates fillers with punctuation`() {
-        assertEquals("हाँ!", com.example.ai.LocalGgufTranslator.tryFastShortUtteranceHindi("Yeah!"))
-        assertEquals("रुको", com.example.ai.LocalGgufTranslator.tryFastShortUtteranceHindi("Wait..."))
-        assertEquals("बकवास बंद कर!", com.example.ai.LocalGgufTranslator.tryFastShortUtteranceHindi("Shut up!"))
-        assertEquals(null, com.example.ai.LocalGgufTranslator.tryFastShortUtteranceHindi("Give me the keys right now"))
+        assertEquals("हाँ!", LocalGgufTranslator.tryFastShortUtteranceHindi("Yeah!"))
+        assertEquals("रुको", LocalGgufTranslator.tryFastShortUtteranceHindi("Wait..."))
+        assertEquals("बकवास बंद कर!", LocalGgufTranslator.tryFastShortUtteranceHindi("Shut up!"))
+        assertEquals(null, LocalGgufTranslator.tryFastShortUtteranceHindi("Give me the keys right now"))
+    }
+
+    @Test
+    fun `Hybrid Turbo routing skips LLM on routine sentences and triggers on slang, dict matches, long lines, or raw intimate cues`() {
+        // Routine short lines stay on fast ML Kit
+        assertFalse(
+            LocalGgufTranslator.requiresLocalLlmContext(
+                englishText = "Where did you park the car?",
+                dialogueStyle = DialogueStyle.RAW_UNCENSORED
+            )
+        )
+        assertFalse(
+            LocalGgufTranslator.requiresLocalLlmContext(
+                englishText = "Let's go downstairs right now.",
+                dialogueStyle = DialogueStyle.CONVERSATIONAL
+            )
+        )
+        // Profanity/slang routes to GGUF (and 'hello' must NOT false-trigger 'hell')
+        assertFalse(LocalGgufTranslator.requiresLocalLlmContext("Hello my friend"))
+        assertTrue(LocalGgufTranslator.requiresLocalLlmContext("What the fuck is going on?"))
+        // Dictionary match forces GGUF
+        assertTrue(
+            LocalGgufTranslator.requiresLocalLlmContext(
+                englishText = "Come here now",
+                hasDictMatch = true
+            )
+        )
+        // >12 words routes to GGUF for long scene coherence
+        assertTrue(
+            LocalGgufTranslator.requiresLocalLlmContext(
+                englishText = "Please open the red door on the second floor before anyone arrives here today"
+            )
+        )
+        // RAW_UNCENSORED uses neighbor context for intimate scenes
+        assertTrue(
+            LocalGgufTranslator.requiresLocalLlmContext(
+                englishText = "Just stay right there and don't move.",
+                prevText = "Come to the bedroom and undress slowly.",
+                dialogueStyle = DialogueStyle.RAW_UNCENSORED
+            )
+        )
+    }
+
+    @Test
+    fun `PCM16 WAV fast-path converts mono 22kHz TTS WAV to 44kHz stereo mix WAV without MediaCodec`() = runTest {
+        val rawTts = tempFolder.newFile("tts_22k_mono.wav")
+        val outMix = tempFolder.newFile("tts_44k_stereo.wav")
+        val srcRate = 22050
+        val monoSamples = ShortArray(srcRate) { i ->
+            (sin(2.0 * PI * 330.0 * i / srcRate) * 9000).toInt().toShort()
+        }
+        WavUtils.writePcmBytesAsWav(
+            pcmBytes = WavUtils.shortArrayToBytes(monoSamples),
+            sampleRate = srcRate,
+            channels = 1,
+            outFile = rawTts
+        )
+
+        assertTrue(WavUtils.isPcm16Wav(rawTts))
+        AudioChunkExtractor.convertWavFileToMixWav(
+            sourceFile = rawTts,
+            outWavFile = outMix,
+            timeScale = 1.0f
+        )
+
+        val hdr = WavUtils.readHeader(outMix)
+        assertEquals(44100, hdr.sampleRate)
+        assertEquals(2, hdr.channels)
+        assertEquals(16, hdr.bitsPerSample)
+        assertTrue(hdr.durationMs in 950L..1050L)
+    }
+
+    @Test
+    fun `O(1) AudioSeparator correctly merges overlapping unsorted speech intervals`() = runTest {
+        val sampleRate = 44100
+        val frames = sampleRate // 1 second
+        val samples = ShortArray(frames * 2) { 8000 } // pure centered mid signal
+
+        val origWav = tempFolder.newFile("overlap_orig.wav")
+        val bgmWav = tempFolder.newFile("overlap_bgm.wav")
+        WavUtils.writePcmBytesAsWav(WavUtils.shortArrayToBytes(samples), sampleRate, 2, origWav)
+
+        val overlappingSegs = listOf(
+            DialogueSegmentEntity(
+                projectId = 1L, chunkIndex = 0, orderIndex = 1,
+                startMs = 400L, endMs = 800L, speakerLabel = "S2",
+                englishText = "Second", audioType = "SPEECH"
+            ),
+            DialogueSegmentEntity(
+                projectId = 1L, chunkIndex = 0, orderIndex = 0,
+                startMs = 200L, endMs = 600L, speakerLabel = "S1",
+                englishText = "First", audioType = "SPEECH"
+            )
+        )
+
+        AudioSeparator.separateBgmAndSfx(
+            origWavFile = origWav,
+            bgmWavFile = bgmWav,
+            segments = overlappingSegs,
+            chunkStartMs = 0L,
+            sourceChannels = 2,
+            preserveBgm = true,
+            removeEnglishDialogue = true
+        )
+
+        assertEquals(origWav.length(), bgmWav.length())
     }
 }

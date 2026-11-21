@@ -47,6 +47,7 @@ class LocalGgufTranslator {
         speakers: List<SpeakerEntity>,
         dialogueStyle: String,
         dictionaryConfig: SlangDictionaryConfig? = null,
+        hybridTurbo: Boolean = true,
         fallbackTranslator: (suspend (String) -> String)? = null,
         onLineTranslated: (suspend (line: TranslatedLine, index: Int, total: Int) -> Unit)? = null
     ): List<TranslatedLine> = withContext(Dispatchers.IO) {
@@ -93,9 +94,31 @@ class LocalGgufTranslator {
                     tryFastShortUtteranceHindi(seg.englishText)
                 } else null
 
+                // Fast-path 3 (Hybrid Turbo): routine everyday lines go through ML Kit (~10 ms)
+                // while slang/adult/profane/complex lines stay on the Local GGUF LLM.
+                val useFastMlKit = fastDirect.isNullOrBlank() &&
+                    fastFiller.isNullOrBlank() &&
+                    hybridTurbo &&
+                    fallbackTranslator != null &&
+                    !requiresLocalLlmContext(
+                        englishText = seg.englishText,
+                        prevText = prevText,
+                        nextText = nextText,
+                        hasDictMatch = prep.appliedMatches.isNotEmpty(),
+                        dialogueStyle = dialogueStyle
+                    )
+
+                val routedMlKitHindi = if (useFastMlKit) {
+                    runCatching { fallbackTranslator!!.invoke(prep.protectedEnglish) }
+                        .getOrNull()
+                        ?.let { raw -> SlangDictionaryManager.restoreAndOverride(raw, prep) }
+                        ?.takeIf { containsDevanagari(it) }
+                } else null
+
                 val finalHindi = when {
                     !fastDirect.isNullOrBlank() -> fastDirect
                     !fastFiller.isNullOrBlank() -> fastFiller
+                    !routedMlKitHindi.isNullOrBlank() -> routedMlKitHindi
                     else -> {
                         val model = handle ?: ensureLoadedLocked(modelFile).also { handle = it }
                         translateSegmentRobustLocked(
@@ -270,7 +293,7 @@ class LocalGgufTranslator {
             dialogueStyle = dialogueStyle
         )
         val wordCount = seg.englishText.trim().split(Regex("\\s+")).size
-        val maxTok = (wordCount * 3 + 28).coerceIn(40, 96)
+        val maxTok = (wordCount * 2 + 24).coerceIn(32, 84)
 
         val primaryRaw = runCatching {
             Llama.complete(
@@ -354,25 +377,21 @@ class LocalGgufTranslator {
         dialogueStyle: String
     ): String = buildString {
         if (dialogueStyle == DialogueStyle.RAW_UNCENSORED) {
-            appendLine("Examples:")
-            appendLine("\"Get the hell out!\" -> \"दफ़ा हो जाओ यहाँ से!\"")
-            appendLine("\"I want you so bad right now.\" -> \"मुझे अभी के अभी तुम चाहिए।\"")
+            appendLine("Ex: \"Get the hell out!\" -> \"दफ़ा हो जा यहाँ से!\"")
         } else {
-            appendLine("Examples:")
-            appendLine("\"Wait, don't leave me here.\" -> \"रुको, मुझे यहाँ छोड़कर मत जाओ।\"")
-            appendLine("\"What are you doing?\" -> \"तुम क्या कर रहे हो?\"")
+            appendLine("Ex: \"Wait for me.\" -> \"मेरे लिए रुको।\"")
         }
         if (glossaryHints.isNotBlank()) {
             appendLine(glossaryHints)
         }
         if (!prevEnglish.isNullOrBlank()) {
-            appendLine("Previous scene line: \"${prevEnglish.take(70)}\"")
+            appendLine("Prev: \"${prevEnglish.take(55)}\"")
         }
         if (!speakerGender.isNullOrBlank() && speakerGender != "NEUTRAL") {
-            val moodPart = if (!emotion.isNullOrBlank() && emotion != "neutral") ", $emotion" else ""
-            appendLine("Speaker: $speakerGender$moodPart")
+            val moodPart = if (!emotion.isNullOrBlank() && emotion != "neutral") ",$emotion" else ""
+            appendLine("Spk:$speakerGender$moodPart")
         }
-        append("Translate to Hindi: \"$englishLine\"")
+        append("HI: \"$englishLine\"")
     }
 
     companion object {
@@ -423,6 +442,36 @@ class LocalGgufTranslator {
             "oh god" to "हे भगवान",
             "oh my god" to "हे भगवान"
         )
+
+        private val SLANG_OR_COMPLEX_REGEX = Regex(
+            """\b(fuck\w*|motherfuck\w*|shit\w*|bitch\w*|asshole\w*|dick\w*|cock\w*|pussy\w*|bastard\w*|whore\w*|slut\w*|horny|naked|nude|kiss\w*|moan\w*|lust\w*|sexy|desire\w*|screw\w*|damn\w*|hell|crap\w*|suck\w*|bang\w*|wtf|cunt\w*|prick\w*|wank\w*|jerk\w*|moron\w*|idiot\w*|bloody|bullshit|goddamn|kill\w*|murder\w*|swear|kidding|babe|darling|honey)\b""",
+            RegexOption.IGNORE_CASE
+        )
+
+        private val INTIMATE_SCENE_CONTEXT_REGEX = Regex(
+            """\b(bed|bedroom|undress\w*|panties|bra|chest|lips|touch\w*|pleasure|harder|deeper|orgasm|cum\w*|sleep with|make love|turn me on)\b""",
+            RegexOption.IGNORE_CASE
+        )
+
+        internal fun requiresLocalLlmContext(
+            englishText: String,
+            prevText: String = "",
+            nextText: String = "",
+            hasDictMatch: Boolean = false,
+            dialogueStyle: String = DialogueStyle.CONVERSATIONAL
+        ): Boolean {
+            if (hasDictMatch) return true
+            val trimmed = englishText.trim()
+            if (trimmed.isEmpty()) return false
+            val wordCount = trimmed.split(Regex("\\s+")).count { it.isNotBlank() }
+            if (wordCount > 12) return true
+            if (SLANG_OR_COMPLEX_REGEX.containsMatchIn(trimmed)) return true
+            if (dialogueStyle == DialogueStyle.RAW_UNCENSORED) {
+                val combined = "$prevText $trimmed $nextText"
+                if (INTIMATE_SCENE_CONTEXT_REGEX.containsMatchIn(combined)) return true
+            }
+            return false
+        }
 
         internal fun tryFastShortUtteranceHindi(englishLine: String): String? {
             val trimmed = englishLine.trim()

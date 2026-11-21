@@ -22,6 +22,7 @@ import com.example.data.local.ChunkEntity
 import com.example.data.local.ChunkStatus
 import com.example.data.local.DialogueSegmentEntity
 import com.example.data.local.DubbingRepository
+import com.example.data.local.DubbingSpeedMode
 import com.example.data.local.EngineMode
 import com.example.data.local.PreferencesRepository
 import com.example.data.local.ProcessingStage
@@ -158,6 +159,8 @@ class DubbingWorker(
 
         val useLocalLlm = project.engineMode == EngineMode.ON_DEVICE_LLM
         val useOnDevice = project.engineMode == EngineMode.ON_DEVICE_FREE || useLocalLlm
+        val studioPrefs = PreferencesRepository(applicationContext).preferencesFlow.first()
+        val hybridTurbo = studioPrefs.dubbingSpeedMode == DubbingSpeedMode.HYBRID_TURBO
         var activeGgufFile: File? = null
         if (useOnDevice) {
             var lastReported = ""
@@ -188,312 +191,337 @@ class DubbingWorker(
                 }
             }
             if (useLocalLlm) {
-                val preferredGguf = PreferencesRepository(applicationContext).preferencesFlow.first().activeGgufModelFileName
-                activeGgufFile = onDeviceEngine.ensureReadyForLocalLlm(preferredGguf, reportStatus)
+                activeGgufFile = onDeviceEngine.ensureReadyForLocalLlm(studioPrefs.activeGgufModelFileName, reportStatus)
             } else {
                 onDeviceEngine.ensureReady(reportStatus)
             }
         }
 
         val totalChunks = chunks.size.coerceAtLeast(1)
+        val chunkWorkProgress = FloatArray(totalChunks)
         val completedChunkTimes = mutableListOf<Long>()
+        val pendingChunks = mutableListOf<ChunkEntity>()
 
         for (chunk in chunks) {
-            if (shouldStopOrPause(projectId)) {
-                return markPausedAndReturn(projectId)
-            }
-
             if (chunk.status == ChunkStatus.MIXED && !retryFailedOnly) {
                 if (chunk.processingTimeMs > 0L) completedChunkTimes.add(chunk.processingTimeMs)
-                continue
+                chunkWorkProgress[chunk.chunkIndex.coerceIn(0, totalChunks - 1)] = 1.0f
+            } else {
+                pendingChunks.add(chunk)
             }
+        }
 
-            val chunkStartWall = System.currentTimeMillis()
-            val chunksDir = repository.chunksDir(projectId)
-            val ttsDir = repository.ttsDir(projectId)
-            val origWav = File(chunksDir, "chunk_${chunk.chunkIndex}_orig.wav")
-            val sttWav = File(chunksDir, "chunk_${chunk.chunkIndex}_stt.wav")
-            val bgmWav = File(chunksDir, "chunk_${chunk.chunkIndex}_bgm.wav")
-            val mixedWav = File(chunksDir, "chunk_${chunk.chunkIndex}_mixed.wav")
+        val chunksDir = repository.chunksDir(projectId)
+        val ttsDir = repository.ttsDir(projectId)
+        val chunkAccumMs = mutableMapOf<Int, Long>().withDefault { 0L }
 
-            var currentChunk = chunk
+        // Execute in 4-chunk waves so heavy native models (Vosk STT, GGUF LLM) load ONCE per wave
+        // instead of thrashing memory/disk between every single chunk.
+        for (wave in pendingChunks.chunked(4)) {
+            val waveStates = mutableMapOf<Int, ChunkEntity>()
 
-            // Stage A: Audio Extraction (if needed)
-            if (!origWav.exists() || !sttWav.exists() || currentChunk.status == ChunkStatus.PENDING) {
-                updateStage(
-                    projectId = projectId,
-                    title = project.title,
-                    stage = "${ProcessingStage.EXTRACTING} (${chunk.chunkIndex + 1}/$totalChunks)",
-                    chunkIndex = chunk.chunkIndex,
-                    totalChunks = totalChunks,
-                    subStepFraction = 0.1f,
-                    completedTimes = completedChunkTimes,
-                    useMediaProcessingType = useOnDevice
-                )
-                AudioChunkExtractor.extractChunk(
-                    context = applicationContext,
-                    sourceUri = sourceUri,
-                    startMs = chunk.startMs,
-                    endMs = chunk.endMs,
-                    origWavFile = origWav,
-                    sttWavFile = sttWav
-                )
-                currentChunk = currentChunk.copy(
-                    origWavPath = origWav.absolutePath,
-                    sttWavPath = sttWav.absolutePath,
-                    status = if (currentChunk.status == ChunkStatus.PENDING) ChunkStatus.EXTRACTED else currentChunk.status,
-                    errorMessage = null
-                )
-                repository.updateChunk(currentChunk)
-            }
+            // Wave Phase 1: Audio Extraction + Vosk English Speech Recognition
+            for (chunk in wave) {
+                if (shouldStopOrPause(projectId)) return markPausedAndReturn(projectId)
+                val p1Start = System.currentTimeMillis()
+                val origWav = File(chunksDir, "chunk_${chunk.chunkIndex}_orig.wav")
+                val sttWav = File(chunksDir, "chunk_${chunk.chunkIndex}_stt.wav")
+                var currentChunk = chunk
 
-            if (shouldStopOrPause(projectId)) return markPausedAndReturn(projectId)
-
-            // Stage B: English Speech Recognition + Speaker Diarization (if not already transcribed)
-            var chunkSegments = repository.getSegmentsForChunk(projectId, chunk.chunkIndex)
-            if (currentChunk.status == ChunkStatus.EXTRACTED || chunkSegments.isEmpty()) {
-                updateStage(
-                    projectId = projectId,
-                    title = project.title,
-                    stage = "${ProcessingStage.TRANSCRIBING} (${chunk.chunkIndex + 1}/$totalChunks)",
-                    chunkIndex = chunk.chunkIndex,
-                    totalChunks = totalChunks,
-                    subStepFraction = 0.25f,
-                    completedTimes = completedChunkTimes,
-                    useMediaProcessingType = useOnDevice
-                )
-
-                val knownSpeakers = repository.getSpeakers(projectId)
-                val sttResult = if (useOnDevice) {
-                    onDeviceEngine.transcribeAudioChunk(
-                        sttWavFile = sttWav,
-                        chunkDurationMs = (chunk.endMs - chunk.startMs).coerceAtLeast(1000L)
-                    )
-                } else {
-                    callWithRateLimitRetry {
-                        aiService.transcribeAudioChunk(
-                            sttWavFile = sttWav,
-                            chunkDurationMs = (chunk.endMs - chunk.startMs).coerceAtLeast(1000L),
-                            knownSpeakers = knownSpeakers
-                        )
-                    }
-                }
-
-                // Register newly discovered speakers in Room
-                val existingCount = knownSpeakers.size
-                val preferredPreset = HindiVoicePresets.all.find { it.id == project.defaultVoicePreset }
-                val newSpeakers = sttResult.speakers.mapIndexed { idx, sp ->
-                    val preset = if (
-                        idx == 0 &&
-                        existingCount == 0 &&
-                        preferredPreset != null &&
-                        sp.inferredGender.equals(preferredPreset.gender, ignoreCase = true)
-                    ) {
-                        preferredPreset
-                    } else {
-                        HindiVoicePresets.defaultForGender(sp.inferredGender, existingCount + idx)
-                    }
-                    SpeakerEntity(
-                        projectId = projectId,
-                        speakerLabel = sp.speakerLabel,
-                        displayName = sp.speakerLabel.replace("_", " ").lowercase()
-                            .replaceFirstChar { it.uppercase() },
-                        gender = sp.inferredGender,
-                        voicePresetName = preset.id,
-                        speedMultiplier = project.defaultSpeechSpeed,
-                        defaultEmotion = project.defaultEmotionBias,
-                        traits = sp.traits
-                    )
-                }
-                repository.insertSpeakersIgnore(newSpeakers)
-
-                // Store segments with exact movie-level timestamps
-                repository.deleteSegmentsForChunk(projectId, chunk.chunkIndex)
-                val entities = sttResult.segments.mapIndexed { orderIdx, seg ->
-                    DialogueSegmentEntity(
-                        projectId = projectId,
-                        chunkIndex = chunk.chunkIndex,
-                        orderIndex = orderIdx,
-                        startMs = chunk.startMs + seg.startOffsetMs,
-                        endMs = chunk.startMs + seg.endOffsetMs,
-                        speakerLabel = seg.speakerLabel,
-                        englishText = seg.englishText,
-                        emotion = seg.emotion,
-                        isOverlapping = seg.isOverlapping,
-                        audioType = seg.audioType,
-                        speechSpeed = project.defaultSpeechSpeed,
-                        status = SegmentStatus.TRANSCRIBED
-                    )
-                }
-                repository.insertSegments(entities)
-                chunkSegments = repository.getSegmentsForChunk(projectId, chunk.chunkIndex)
-
-                currentChunk = currentChunk.copy(status = ChunkStatus.TRANSCRIBED, errorMessage = null)
-                repository.updateChunk(currentChunk)
-            }
-
-            if (shouldStopOrPause(projectId)) return markPausedAndReturn(projectId)
-
-            // Stage C: English -> Hindi Translation (only segments without hindiText)
-            val untranslated = chunkSegments.filter {
-                it.audioType == "SPEECH" && it.englishText.isNotBlank() && it.hindiText.isBlank()
-            }
-            if (untranslated.isNotEmpty() || currentChunk.status == ChunkStatus.TRANSCRIBED) {
-                updateStage(
-                    projectId = projectId,
-                    title = project.title,
-                    stage = "${ProcessingStage.TRANSLATING} (${chunk.chunkIndex + 1}/$totalChunks)",
-                    chunkIndex = chunk.chunkIndex,
-                    totalChunks = totalChunks,
-                    subStepFraction = 0.45f,
-                    completedTimes = completedChunkTimes,
-                    useMediaProcessingType = useOnDevice
-                )
-                project = repository.getProject(projectId) ?: project
-                val speakers = repository.getSpeakers(projectId)
-                if (untranslated.isNotEmpty()) {
-                    val untranslatedById = untranslated.associateBy { it.id }
-                    val alreadySavedIds = mutableSetOf<Long>()
-                    val translations = when {
-                        useLocalLlm && activeGgufFile != null -> {
-                            val totalToTranslate = untranslated.size.coerceAtLeast(1)
-                            updateStage(
-                                projectId = projectId,
-                                title = project.title,
-                                stage = "Local GGUF Translating (0/$totalToTranslate • Chunk ${chunk.chunkIndex + 1}/$totalChunks)",
-                                chunkIndex = chunk.chunkIndex,
-                                totalChunks = totalChunks,
-                                subStepFraction = 0.34f,
-                                completedTimes = completedChunkTimes,
-                                useMediaProcessingType = true
-                            )
-                            onDeviceEngine.translateToHindiWithLocalLlm(
-                                segments = untranslated,
-                                speakers = speakers,
-                                dialogueStyle = project.dialogueStyle,
-                                modelFile = activeGgufFile
-                            ) { trLine, idx, totalLines ->
-                                val origSeg = untranslatedById[trLine.segmentId]
-                                if (origSeg != null && trLine.hindiText.isNotBlank()) {
-                                    repository.updateSegment(
-                                        origSeg.copy(
-                                            hindiText = trLine.hindiText,
-                                            emotion = trLine.emotion.ifBlank { origSeg.emotion },
-                                            status = SegmentStatus.TRANSLATED,
-                                            errorMessage = null
-                                        )
-                                    )
-                                    alreadySavedIds.add(origSeg.id)
-                                }
-                                val doneCount = (idx + 1).coerceAtMost(totalLines)
-                                val stepFrac = 0.34f + (0.20f * (doneCount.toFloat() / totalLines.coerceAtLeast(1)))
-                                updateStage(
-                                    projectId = projectId,
-                                    title = project.title,
-                                    stage = "Local GGUF Translating ($doneCount/$totalLines • Chunk ${chunk.chunkIndex + 1}/$totalChunks)",
-                                    chunkIndex = chunk.chunkIndex,
-                                    totalChunks = totalChunks,
-                                    subStepFraction = stepFrac,
-                                    completedTimes = completedChunkTimes,
-                                    useMediaProcessingType = true
-                                )
-                                if (shouldStopOrPause(projectId)) {
-                                    throw CancellationException("Paused during Local GGUF translation")
-                                }
-                            }
-                        }
-                        useOnDevice -> onDeviceEngine.translateToHindi(
-                            segments = untranslated,
-                            dialogueStyle = project.dialogueStyle
-                        )
-                        else -> callWithRateLimitRetry {
-                            aiService.translateToHindi(
-                                segments = untranslated,
-                                speakers = speakers,
-                                dialogueStyle = project.dialogueStyle,
-                                dictionaryConfig = SlangDictionaryManager.loadConfig(applicationContext)
-                            )
-                        }
-                    }
-                    val translatedById = translations.associateBy { it.segmentId }
-                    for (seg in untranslated) {
-                        if (seg.id in alreadySavedIds) continue
-                        val tr = translatedById[seg.id]
-                        if (tr != null && tr.hindiText.isNotBlank()) {
-                            repository.updateSegment(
-                                seg.copy(
-                                    hindiText = tr.hindiText,
-                                    emotion = tr.emotion.ifBlank { seg.emotion },
-                                    status = SegmentStatus.TRANSLATED,
-                                    errorMessage = null
-                                )
-                            )
-                        } else {
-                            repository.updateSegment(
-                                seg.copy(
-                                    status = SegmentStatus.FAILED,
-                                    errorMessage = "Hindi translation omitted for this segment."
-                                )
-                            )
-                        }
-                    }
-                    chunkSegments = repository.getSegmentsForChunk(projectId, chunk.chunkIndex)
-                }
-                currentChunk = currentChunk.copy(status = ChunkStatus.TRANSLATED)
-                repository.updateChunk(currentChunk)
-            }
-
-            if (shouldStopOrPause(projectId)) return markPausedAndReturn(projectId)
-
-            // Stage D: Hindi AI Voice Generation (segment by segment, skipping already-completed!)
-            val speakersMap = repository.getSpeakers(projectId).associateBy { it.speakerLabel }
-            val speechSegments = chunkSegments.filter {
-                it.audioType == "SPEECH" && it.hindiText.isNotBlank()
-            }
-            val segmentsToSynthesize = speechSegments.filter { seg ->
-                val ttsExists = seg.ttsAudioPath?.let { File(it).exists() } == true
-                if (retryFailedOnly) {
-                    seg.status == SegmentStatus.FAILED || !ttsExists
-                } else {
-                    seg.status != SegmentStatus.TTS_DONE || !ttsExists
-                }
-            }
-
-            if (segmentsToSynthesize.isNotEmpty()) {
-                for ((sIdx, seg) in segmentsToSynthesize.withIndex()) {
-                    if (shouldStopOrPause(projectId)) return markPausedAndReturn(projectId)
-
-                    val frac = 0.50f + (0.32f * (sIdx.toFloat() / segmentsToSynthesize.size.coerceAtLeast(1)))
+                if (!origWav.exists() || !sttWav.exists() || currentChunk.status == ChunkStatus.PENDING) {
                     updateStage(
                         projectId = projectId,
                         title = project.title,
-                        stage = "${ProcessingStage.GENERATING_TTS} (${sIdx + 1}/${segmentsToSynthesize.size} in chunk ${chunk.chunkIndex + 1})",
+                        stage = "${ProcessingStage.EXTRACTING} (${chunk.chunkIndex + 1}/$totalChunks)",
                         chunkIndex = chunk.chunkIndex,
-                        totalChunks = totalChunks,
-                        subStepFraction = frac,
+                        subStepFraction = 0.10f,
+                        chunkWorkProgress = chunkWorkProgress,
+                        completedTimes = completedChunkTimes,
+                        useMediaProcessingType = useOnDevice
+                    )
+                    AudioChunkExtractor.extractChunk(
+                        context = applicationContext,
+                        sourceUri = sourceUri,
+                        startMs = chunk.startMs,
+                        endMs = chunk.endMs,
+                        origWavFile = origWav,
+                        sttWavFile = sttWav
+                    )
+                    currentChunk = currentChunk.copy(
+                        origWavPath = origWav.absolutePath,
+                        sttWavPath = sttWav.absolutePath,
+                        status = if (currentChunk.status == ChunkStatus.PENDING) ChunkStatus.EXTRACTED else currentChunk.status,
+                        errorMessage = null
+                    )
+                    repository.updateChunk(currentChunk)
+                } else {
+                    chunkWorkProgress[chunk.chunkIndex.coerceIn(0, totalChunks - 1)] =
+                        maxOf(chunkWorkProgress[chunk.chunkIndex.coerceIn(0, totalChunks - 1)], 0.10f)
+                }
+
+                if (shouldStopOrPause(projectId)) return markPausedAndReturn(projectId)
+
+                val existingSegments = repository.getSegmentsForChunk(projectId, chunk.chunkIndex)
+                if (currentChunk.status == ChunkStatus.EXTRACTED || existingSegments.isEmpty()) {
+                    updateStage(
+                        projectId = projectId,
+                        title = project.title,
+                        stage = "${ProcessingStage.TRANSCRIBING} (${chunk.chunkIndex + 1}/$totalChunks)",
+                        chunkIndex = chunk.chunkIndex,
+                        subStepFraction = 0.25f,
+                        chunkWorkProgress = chunkWorkProgress,
                         completedTimes = completedChunkTimes,
                         useMediaProcessingType = useOnDevice
                     )
 
-                    val speaker = speakersMap[seg.speakerLabel]
-                    val voicePreset = speaker?.voicePresetName ?: project.defaultVoicePreset.ifBlank { "Kore" }
-                    val speed = (speaker?.speedMultiplier ?: seg.speechSpeed).coerceIn(0.75f, 1.35f)
-                    val ttsOut = File(ttsDir, "seg_${seg.id}_tts.wav")
-
-                    try {
-                        val ttsDurationMs = if (useOnDevice) {
-                            onDeviceEngine.generateHindiTts(
-                                hindiText = seg.hindiText,
-                                voicePresetName = voicePreset,
-                                emotion = seg.emotion,
-                                speedMultiplier = speed,
-                                targetSlotDurationMs = (seg.endMs - seg.startMs).coerceAtLeast(400L),
-                                outWavFile = ttsOut,
-                                tempCacheDir = applicationContext.cacheDir
+                    val knownSpeakers = repository.getSpeakers(projectId)
+                    val sttResult = if (useOnDevice) {
+                        onDeviceEngine.transcribeAudioChunk(
+                            sttWavFile = sttWav,
+                            chunkDurationMs = (chunk.endMs - chunk.startMs).coerceAtLeast(1000L)
+                        )
+                    } else {
+                        callWithRateLimitRetry {
+                            aiService.transcribeAudioChunk(
+                                sttWavFile = sttWav,
+                                chunkDurationMs = (chunk.endMs - chunk.startMs).coerceAtLeast(1000L),
+                                knownSpeakers = knownSpeakers
                             )
+                        }
+                    }
+
+                    val existingCount = knownSpeakers.size
+                    val preferredPreset = HindiVoicePresets.all.find { it.id == project.defaultVoicePreset }
+                    val newSpeakers = sttResult.speakers.mapIndexed { idx, sp ->
+                        val preset = if (
+                            idx == 0 &&
+                            existingCount == 0 &&
+                            preferredPreset != null &&
+                            sp.inferredGender.equals(preferredPreset.gender, ignoreCase = true)
+                        ) {
+                            preferredPreset
                         } else {
-                            callWithRateLimitRetry {
-                                aiService.generateHindiTts(
+                            HindiVoicePresets.defaultForGender(sp.inferredGender, existingCount + idx)
+                        }
+                        SpeakerEntity(
+                            projectId = projectId,
+                            speakerLabel = sp.speakerLabel,
+                            displayName = sp.speakerLabel.replace("_", " ").lowercase()
+                                .replaceFirstChar { it.uppercase() },
+                            gender = sp.inferredGender,
+                            voicePresetName = preset.id,
+                            speedMultiplier = project.defaultSpeechSpeed,
+                            defaultEmotion = project.defaultEmotionBias,
+                            traits = sp.traits
+                        )
+                    }
+                    repository.insertSpeakersIgnore(newSpeakers)
+
+                    repository.deleteSegmentsForChunk(projectId, chunk.chunkIndex)
+                    val entities = sttResult.segments.mapIndexed { orderIdx, seg ->
+                        DialogueSegmentEntity(
+                            projectId = projectId,
+                            chunkIndex = chunk.chunkIndex,
+                            orderIndex = orderIdx,
+                            startMs = chunk.startMs + seg.startOffsetMs,
+                            endMs = chunk.startMs + seg.endOffsetMs,
+                            speakerLabel = seg.speakerLabel,
+                            englishText = seg.englishText,
+                            emotion = seg.emotion,
+                            isOverlapping = seg.isOverlapping,
+                            audioType = seg.audioType,
+                            speechSpeed = project.defaultSpeechSpeed,
+                            status = SegmentStatus.TRANSCRIBED
+                        )
+                    }
+                    repository.insertSegments(entities)
+                    currentChunk = currentChunk.copy(status = ChunkStatus.TRANSCRIBED, errorMessage = null)
+                    repository.updateChunk(currentChunk)
+                } else {
+                    chunkWorkProgress[chunk.chunkIndex.coerceIn(0, totalChunks - 1)] =
+                        maxOf(chunkWorkProgress[chunk.chunkIndex.coerceIn(0, totalChunks - 1)], 0.25f)
+                }
+
+                chunkAccumMs[chunk.chunkIndex] =
+                    chunkAccumMs.getValue(chunk.chunkIndex) + (System.currentTimeMillis() - p1Start).coerceAtLeast(0L)
+                waveStates[chunk.chunkIndex] = currentChunk
+            }
+
+            // Wave Phase 2: English -> Hindi Translation (Local GGUF stays mapped across entire wave!)
+            for (chunk in wave) {
+                if (shouldStopOrPause(projectId)) return markPausedAndReturn(projectId)
+                val p2Start = System.currentTimeMillis()
+                var currentChunk = waveStates[chunk.chunkIndex] ?: chunk
+                val chunkSegments = repository.getSegmentsForChunk(projectId, chunk.chunkIndex)
+                val untranslated = chunkSegments.filter {
+                    it.audioType == "SPEECH" && it.englishText.isNotBlank() && it.hindiText.isBlank()
+                }
+                if (untranslated.isNotEmpty() || currentChunk.status == ChunkStatus.TRANSCRIBED) {
+                    updateStage(
+                        projectId = projectId,
+                        title = project.title,
+                        stage = "${ProcessingStage.TRANSLATING} (${chunk.chunkIndex + 1}/$totalChunks)",
+                        chunkIndex = chunk.chunkIndex,
+                        subStepFraction = 0.45f,
+                        chunkWorkProgress = chunkWorkProgress,
+                        completedTimes = completedChunkTimes,
+                        useMediaProcessingType = useOnDevice
+                    )
+                    project = repository.getProject(projectId) ?: project
+                    val speakers = repository.getSpeakers(projectId)
+                    if (untranslated.isNotEmpty()) {
+                        val untranslatedById = untranslated.associateBy { it.id }
+                        val alreadySavedIds = mutableSetOf<Long>()
+                        val translations = when {
+                            useLocalLlm && activeGgufFile != null -> {
+                                val totalToTranslate = untranslated.size.coerceAtLeast(1)
+                                val modeTag = if (hybridTurbo) "Hybrid Turbo" else "Local GGUF"
+                                updateStage(
+                                    projectId = projectId,
+                                    title = project.title,
+                                    stage = "$modeTag Translating (0/$totalToTranslate • Chunk ${chunk.chunkIndex + 1}/$totalChunks)",
+                                    chunkIndex = chunk.chunkIndex,
+                                    subStepFraction = 0.34f,
+                                    chunkWorkProgress = chunkWorkProgress,
+                                    completedTimes = completedChunkTimes,
+                                    useMediaProcessingType = true
+                                )
+                                onDeviceEngine.translateToHindiWithLocalLlm(
+                                    segments = untranslated,
+                                    speakers = speakers,
+                                    dialogueStyle = project.dialogueStyle,
+                                    modelFile = activeGgufFile,
+                                    hybridTurbo = hybridTurbo
+                                ) { trLine, idx, totalLines ->
+                                    val origSeg = untranslatedById[trLine.segmentId]
+                                    if (origSeg != null && trLine.hindiText.isNotBlank()) {
+                                        repository.updateSegment(
+                                            origSeg.copy(
+                                                hindiText = trLine.hindiText,
+                                                emotion = trLine.emotion.ifBlank { origSeg.emotion },
+                                                status = SegmentStatus.TRANSLATED,
+                                                errorMessage = null
+                                            )
+                                        )
+                                        alreadySavedIds.add(origSeg.id)
+                                    }
+                                    val doneCount = (idx + 1).coerceAtMost(totalLines)
+                                    val stepFrac = 0.34f + (0.20f * (doneCount.toFloat() / totalLines.coerceAtLeast(1)))
+                                    updateStage(
+                                        projectId = projectId,
+                                        title = project.title,
+                                        stage = "$modeTag Translating ($doneCount/$totalLines • Chunk ${chunk.chunkIndex + 1}/$totalChunks)",
+                                        chunkIndex = chunk.chunkIndex,
+                                        subStepFraction = stepFrac,
+                                        chunkWorkProgress = chunkWorkProgress,
+                                        completedTimes = completedChunkTimes,
+                                        useMediaProcessingType = true
+                                    )
+                                    if (shouldStopOrPause(projectId)) {
+                                        throw CancellationException("Paused during Local GGUF translation")
+                                    }
+                                }
+                            }
+                            useOnDevice -> onDeviceEngine.translateToHindi(
+                                segments = untranslated,
+                                dialogueStyle = project.dialogueStyle
+                            )
+                            else -> callWithRateLimitRetry {
+                                aiService.translateToHindi(
+                                    segments = untranslated,
+                                    speakers = speakers,
+                                    dialogueStyle = project.dialogueStyle,
+                                    dictionaryConfig = SlangDictionaryManager.loadConfig(applicationContext)
+                                )
+                            }
+                        }
+                        val translatedById = translations.associateBy { it.segmentId }
+                        for (seg in untranslated) {
+                            if (seg.id in alreadySavedIds) continue
+                            val tr = translatedById[seg.id]
+                            if (tr != null && tr.hindiText.isNotBlank()) {
+                                repository.updateSegment(
+                                    seg.copy(
+                                        hindiText = tr.hindiText,
+                                        emotion = tr.emotion.ifBlank { seg.emotion },
+                                        status = SegmentStatus.TRANSLATED,
+                                        errorMessage = null
+                                    )
+                                )
+                            } else {
+                                repository.updateSegment(
+                                    seg.copy(
+                                        status = SegmentStatus.FAILED,
+                                        errorMessage = "Hindi translation omitted for this segment."
+                                    )
+                                )
+                            }
+                        }
+                    }
+                    currentChunk = currentChunk.copy(status = ChunkStatus.TRANSLATED)
+                    repository.updateChunk(currentChunk)
+                } else {
+                    chunkWorkProgress[chunk.chunkIndex.coerceIn(0, totalChunks - 1)] =
+                        maxOf(chunkWorkProgress[chunk.chunkIndex.coerceIn(0, totalChunks - 1)], 0.54f)
+                }
+
+                chunkAccumMs[chunk.chunkIndex] =
+                    chunkAccumMs.getValue(chunk.chunkIndex) + (System.currentTimeMillis() - p2Start).coerceAtLeast(0L)
+                waveStates[chunk.chunkIndex] = currentChunk
+            }
+
+            // Free GGUF weights after the wave's translation phase so TTS + Mixing + next wave Vosk have full RAM
+            if (useLocalLlm) {
+                onDeviceEngine.releaseLocalLlm()
+            }
+
+            // Wave Phase 3: Hindi Voice Synthesis + O(1) BGM Separation + Audio Mixing
+            for (chunk in wave) {
+                if (shouldStopOrPause(projectId)) return markPausedAndReturn(projectId)
+                val p3Start = System.currentTimeMillis()
+                val origWav = File(chunksDir, "chunk_${chunk.chunkIndex}_orig.wav")
+                val bgmWav = File(chunksDir, "chunk_${chunk.chunkIndex}_bgm.wav")
+                val mixedWav = File(chunksDir, "chunk_${chunk.chunkIndex}_mixed.wav")
+                var currentChunk = waveStates[chunk.chunkIndex] ?: chunk
+
+                var chunkSegments = repository.getSegmentsForChunk(projectId, chunk.chunkIndex)
+                val speakersMap = repository.getSpeakers(projectId).associateBy { it.speakerLabel }
+                val speechSegments = chunkSegments.filter {
+                    it.audioType == "SPEECH" && it.hindiText.isNotBlank()
+                }
+                val segmentsToSynthesize = speechSegments.filter { seg ->
+                    val ttsExists = seg.ttsAudioPath?.let { File(it).exists() } == true
+                    if (retryFailedOnly) {
+                        seg.status == SegmentStatus.FAILED || !ttsExists
+                    } else {
+                        seg.status != SegmentStatus.TTS_DONE || !ttsExists
+                    }
+                }
+
+                if (segmentsToSynthesize.isNotEmpty()) {
+                    for ((sIdx, seg) in segmentsToSynthesize.withIndex()) {
+                        if (shouldStopOrPause(projectId)) return markPausedAndReturn(projectId)
+
+                        val frac = 0.55f + (0.27f * (sIdx.toFloat() / segmentsToSynthesize.size.coerceAtLeast(1)))
+                        updateStage(
+                            projectId = projectId,
+                            title = project.title,
+                            stage = "${ProcessingStage.GENERATING_TTS} (${sIdx + 1}/${segmentsToSynthesize.size} in chunk ${chunk.chunkIndex + 1})",
+                            chunkIndex = chunk.chunkIndex,
+                            subStepFraction = frac,
+                            chunkWorkProgress = chunkWorkProgress,
+                            completedTimes = completedChunkTimes,
+                            useMediaProcessingType = useOnDevice
+                        )
+
+                        val speaker = speakersMap[seg.speakerLabel]
+                        val voicePreset = speaker?.voicePresetName ?: project.defaultVoicePreset.ifBlank { "Kore" }
+                        val speed = (speaker?.speedMultiplier ?: seg.speechSpeed).coerceIn(0.75f, 1.35f)
+                        val ttsOut = File(ttsDir, "seg_${seg.id}_tts.wav")
+
+                        try {
+                            val ttsDurationMs = if (useOnDevice) {
+                                onDeviceEngine.generateHindiTts(
                                     hindiText = seg.hindiText,
                                     voicePresetName = voicePreset,
                                     emotion = seg.emotion,
@@ -502,101 +530,113 @@ class DubbingWorker(
                                     outWavFile = ttsOut,
                                     tempCacheDir = applicationContext.cacheDir
                                 )
+                            } else {
+                                callWithRateLimitRetry {
+                                    aiService.generateHindiTts(
+                                        hindiText = seg.hindiText,
+                                        voicePresetName = voicePreset,
+                                        emotion = seg.emotion,
+                                        speedMultiplier = speed,
+                                        targetSlotDurationMs = (seg.endMs - seg.startMs).coerceAtLeast(400L),
+                                        outWavFile = ttsOut,
+                                        tempCacheDir = applicationContext.cacheDir
+                                    )
+                                }
                             }
-                        }
-                        repository.updateSegment(
-                            seg.copy(
-                                ttsAudioPath = ttsOut.absolutePath,
-                                ttsDurationMs = ttsDurationMs,
-                                status = SegmentStatus.TTS_DONE,
-                                errorMessage = null
+                            repository.updateSegment(
+                                seg.copy(
+                                    ttsAudioPath = ttsOut.absolutePath,
+                                    ttsDurationMs = ttsDurationMs,
+                                    status = SegmentStatus.TTS_DONE,
+                                    errorMessage = null
+                                )
                             )
-                        )
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Segment ${seg.id} TTS failed", e)
-                        repository.updateSegment(
-                            seg.copy(
-                                status = SegmentStatus.FAILED,
-                                errorMessage = e.localizedMessage ?: "TTS generation failed"
-                            )
-                        )
-                        // If App Check or fatal quota hit, abort cleanly so user sees the real error immediately
-                        if (e is GeminiApiException && (e.isAppCheckOrAuth || e.isRateLimitOrQuota)) {
-                            repository.updateChunk(
-                                currentChunk.copy(status = ChunkStatus.FAILED, errorMessage = e.message)
-                            )
+                        } catch (e: CancellationException) {
                             throw e
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Segment ${seg.id} TTS failed", e)
+                            repository.updateSegment(
+                                seg.copy(
+                                    status = SegmentStatus.FAILED,
+                                    errorMessage = e.localizedMessage ?: "TTS generation failed"
+                                )
+                            )
+                            if (e is GeminiApiException && (e.isAppCheckOrAuth || e.isRateLimitOrQuota)) {
+                                repository.updateChunk(
+                                    currentChunk.copy(status = ChunkStatus.FAILED, errorMessage = e.message)
+                                )
+                                throw e
+                            }
                         }
                     }
                 }
+
+                if (shouldStopOrPause(projectId)) return markPausedAndReturn(projectId)
+
+                project = repository.getProject(projectId) ?: project
+                updateStage(
+                    projectId = projectId,
+                    title = project.title,
+                    stage = "${ProcessingStage.SEPARATING_BGM} (${chunk.chunkIndex + 1}/$totalChunks)",
+                    chunkIndex = chunk.chunkIndex,
+                    subStepFraction = 0.88f,
+                    chunkWorkProgress = chunkWorkProgress,
+                    completedTimes = completedChunkTimes,
+                    useMediaProcessingType = true
+                )
+
+                chunkSegments = repository.getSegmentsForChunk(projectId, chunk.chunkIndex)
+                AudioSeparator.separateBgmAndSfx(
+                    origWavFile = origWav,
+                    bgmWavFile = bgmWav,
+                    segments = chunkSegments,
+                    chunkStartMs = chunk.startMs,
+                    sourceChannels = project.audioChannels,
+                    preserveBgm = project.preserveBgm,
+                    removeEnglishDialogue = project.removeEnglishDialogue
+                )
+
+                updateStage(
+                    projectId = projectId,
+                    title = project.title,
+                    stage = "${ProcessingStage.MIXING} (${chunk.chunkIndex + 1}/$totalChunks)",
+                    chunkIndex = chunk.chunkIndex,
+                    subStepFraction = 0.95f,
+                    chunkWorkProgress = chunkWorkProgress,
+                    completedTimes = completedChunkTimes,
+                    useMediaProcessingType = true
+                )
+
+                val positionedTts = chunkSegments
+                    .filter { it.status == SegmentStatus.TTS_DONE && it.ttsAudioPath != null }
+                    .map { AudioMixer.PositionedTts(it, File(it.ttsAudioPath!!)) }
+
+                AudioMixer.mixChunk(
+                    origWavFile = origWav,
+                    bgmWavFile = bgmWav,
+                    ttsSegments = positionedTts,
+                    chunkStartMs = chunk.startMs,
+                    hindiVolume = project.hindiVolume,
+                    bgmVolume = project.bgmVolume,
+                    originalVolume = project.originalVolume,
+                    outputMixedWav = mixedWav
+                )
+
+                val elapsed = (chunkAccumMs.getValue(chunk.chunkIndex) + (System.currentTimeMillis() - p3Start))
+                    .coerceAtLeast(100L)
+                completedChunkTimes.add(elapsed)
+                chunkWorkProgress[chunk.chunkIndex.coerceIn(0, totalChunks - 1)] = 1.0f
+
+                val hasFailedSegs = chunkSegments.any { it.status == SegmentStatus.FAILED }
+                currentChunk = currentChunk.copy(
+                    bgmWavPath = bgmWav.absolutePath,
+                    mixedWavPath = mixedWav.absolutePath,
+                    status = if (hasFailedSegs) ChunkStatus.FAILED else ChunkStatus.MIXED,
+                    processingTimeMs = elapsed,
+                    errorMessage = if (hasFailedSegs) "Some dialogue segments failed TTS" else null
+                )
+                repository.updateChunk(currentChunk)
             }
-
-            if (shouldStopOrPause(projectId)) return markPausedAndReturn(projectId)
-
-            // Stage E: Background Music & SFX Preservation + Mixing
-            project = repository.getProject(projectId) ?: project
-            updateStage(
-                projectId = projectId,
-                title = project.title,
-                stage = "${ProcessingStage.SEPARATING_BGM} (${chunk.chunkIndex + 1}/$totalChunks)",
-                chunkIndex = chunk.chunkIndex,
-                totalChunks = totalChunks,
-                subStepFraction = 0.86f,
-                completedTimes = completedChunkTimes,
-                useMediaProcessingType = true
-            )
-
-            chunkSegments = repository.getSegmentsForChunk(projectId, chunk.chunkIndex)
-            AudioSeparator.separateBgmAndSfx(
-                origWavFile = origWav,
-                bgmWavFile = bgmWav,
-                segments = chunkSegments,
-                chunkStartMs = chunk.startMs,
-                sourceChannels = project.audioChannels,
-                preserveBgm = project.preserveBgm,
-                removeEnglishDialogue = project.removeEnglishDialogue
-            )
-
-            updateStage(
-                projectId = projectId,
-                title = project.title,
-                stage = "${ProcessingStage.MIXING} (${chunk.chunkIndex + 1}/$totalChunks)",
-                chunkIndex = chunk.chunkIndex,
-                totalChunks = totalChunks,
-                subStepFraction = 0.94f,
-                completedTimes = completedChunkTimes,
-                useMediaProcessingType = true
-            )
-
-            val positionedTts = chunkSegments
-                .filter { it.status == SegmentStatus.TTS_DONE && it.ttsAudioPath != null }
-                .map { AudioMixer.PositionedTts(it, File(it.ttsAudioPath!!)) }
-
-            AudioMixer.mixChunk(
-                origWavFile = origWav,
-                bgmWavFile = bgmWav,
-                ttsSegments = positionedTts,
-                chunkStartMs = chunk.startMs,
-                hindiVolume = project.hindiVolume,
-                bgmVolume = project.bgmVolume,
-                originalVolume = project.originalVolume,
-                outputMixedWav = mixedWav
-            )
-
-            val elapsed = (System.currentTimeMillis() - chunkStartWall).coerceAtLeast(100L)
-            completedChunkTimes.add(elapsed)
-
-            val hasFailedSegs = chunkSegments.any { it.status == SegmentStatus.FAILED }
-            currentChunk = currentChunk.copy(
-                bgmWavPath = bgmWav.absolutePath,
-                mixedWavPath = mixedWav.absolutePath,
-                status = if (hasFailedSegs) ChunkStatus.FAILED else ChunkStatus.MIXED,
-                processingTimeMs = elapsed,
-                errorMessage = if (hasFailedSegs) "Some dialogue segments failed TTS" else null
-            )
-            repository.updateChunk(currentChunk)
         }
 
         val failedCount = repository.getFailedSegments(projectId).size
@@ -739,18 +779,25 @@ class DubbingWorker(
         title: String,
         stage: String,
         chunkIndex: Int,
-        totalChunks: Int,
         subStepFraction: Float,
+        chunkWorkProgress: FloatArray,
         completedTimes: List<Long>,
         useMediaProcessingType: Boolean
     ) {
-        val overallProgress = (((chunkIndex + subStepFraction) / totalChunks.toFloat()) * 100f)
+        val idx = chunkIndex.coerceIn(0, chunkWorkProgress.lastIndex.coerceAtLeast(0))
+        val clampedStep = subStepFraction.coerceIn(0f, 1f)
+        if (clampedStep > chunkWorkProgress[idx]) {
+            chunkWorkProgress[idx] = clampedStep
+        }
+        val totalChunks = chunkWorkProgress.size.coerceAtLeast(1)
+        val doneSum = chunkWorkProgress.sum()
+        val overallProgress = ((doneSum / totalChunks.toFloat()) * 100f)
             .toInt().coerceIn(1, 99)
         // Only compute ETA when >= 1 full chunk has completed with real measured timing
         val etaMs = if (completedTimes.isNotEmpty()) {
             val avgPerChunk = completedTimes.average().toLong()
-            val remainingChunks = (totalChunks - chunkIndex).coerceAtLeast(1)
-            (avgPerChunk * remainingChunks * (1f - subStepFraction)).toLong().coerceAtLeast(1000L)
+            val remainingUnits = (totalChunks.toFloat() - doneSum).coerceAtLeast(0.05f)
+            (avgPerChunk * remainingUnits).toLong().coerceAtLeast(1000L)
         } else null
 
         repository.updateProjectProgress(

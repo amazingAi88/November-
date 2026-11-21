@@ -93,13 +93,32 @@ object AudioSeparator {
             return@withContext
         }
 
-        val speechIntervals = segments
+        val sortedIntervals = segments
+            .asSequence()
             .filter { it.audioType == "SPEECH" && it.endMs > it.startMs }
             .map { seg ->
                 val relStart = (seg.startMs - chunkStartMs).coerceAtLeast(0L)
                 val relEnd = (seg.endMs - chunkStartMs).coerceAtLeast(relStart)
                 relStart to relEnd
             }
+            .sortedBy { it.first }
+            .toList()
+
+        // Merge overlapping intervals into primitive arrays for O(1) advancing pointer check per frame
+        val mergedStartsList = mutableListOf<Long>()
+        val mergedEndsList = mutableListOf<Long>()
+        for ((s, e) in sortedIntervals) {
+            if (mergedStartsList.isEmpty() || s > mergedEndsList.last()) {
+                mergedStartsList.add(s)
+                mergedEndsList.add(e)
+            } else if (e > mergedEndsList.last()) {
+                mergedEndsList[mergedEndsList.lastIndex] = e
+            }
+        }
+        val intervalCount = mergedStartsList.size
+        val intervalStarts = mergedStartsList.toLongArray()
+        val intervalEnds = mergedEndsList.toLongArray()
+        var intervalCursor = 0
 
         val sampleRate = header.sampleRate.toDouble()
         // Two cascaded speech-presence filters covering formants (450Hz..3200Hz)
@@ -112,9 +131,12 @@ object AudioSeparator {
         val rampFrames = (sampleRate * 0.035).toInt().coerceAtLeast(1) // 35ms smooth fade
         var speechMixFactor = 0.0 // 0 = non-speech (keep full BGM), 1 = active English speech
 
-        val framesPerBuffer = 4096
+        val framesPerBuffer = 8192
         val bytesPerBuffer = framesPerBuffer * header.bytesPerFrame
-        val inBytes = ByteArray(bytesPerBuffer)
+        val ioBytes = ByteArray(bytesPerBuffer)
+        val samples = ShortArray(framesPerBuffer * header.channels)
+        val byteBuf = java.nio.ByteBuffer.wrap(ioBytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        val step = 1.0 / rampFrames
 
         RandomAccessFile(origWavFile, "r").use { inRaf ->
             RandomAccessFile(bgmWavFile, "rw").use { outRaf ->
@@ -128,15 +150,23 @@ object AudioSeparator {
                 while (remaining > 0) {
                     coroutineContext.ensureActive()
                     val toRead = minOf(remaining, bytesPerBuffer.toLong()).toInt()
-                    inRaf.readFully(inBytes, 0, toRead)
-                    val samples = WavUtils.bytesToShortArray(inBytes, toRead)
-                    val frames = samples.size / header.channels
+                    inRaf.readFully(ioBytes, 0, toRead)
+                    val sampleCount = toRead / 2
+                    val frames = sampleCount / header.channels
+
+                    byteBuf.position(0)
+                    byteBuf.limit(toRead)
+                    byteBuf.asShortBuffer().get(samples, 0, sampleCount)
 
                     for (f in 0 until frames) {
                         val timeMs = ((frameCursor + f) * 1000L) / header.sampleRate
-                        val activeSpeech = speechIntervals.any { (s, e) -> timeMs in s..e }
+                        while (intervalCursor < intervalCount && timeMs > intervalEnds[intervalCursor]) {
+                            intervalCursor++
+                        }
+                        val activeSpeech = intervalCursor < intervalCount &&
+                            timeMs >= intervalStarts[intervalCursor] &&
+                            timeMs <= intervalEnds[intervalCursor]
                         val targetFactor = if (activeSpeech) 1.0 else 0.0
-                        val step = 1.0 / rampFrames
                         speechMixFactor = when {
                             speechMixFactor < targetFactor -> (speechMixFactor + step).coerceAtMost(1.0)
                             speechMixFactor > targetFactor -> (speechMixFactor - step).coerceAtLeast(0.0)
@@ -144,8 +174,9 @@ object AudioSeparator {
                         }
 
                         if (header.channels >= 2) {
-                            val l = samples[f * header.channels].toDouble()
-                            val r = samples[f * header.channels + 1].toDouble()
+                            val idx = f * header.channels
+                            val l = samples[idx].toDouble()
+                            val r = samples[idx + 1].toDouble()
 
                             if (isStereoSource) {
                                 val mid = 0.5 * (l + r)
@@ -160,18 +191,16 @@ object AudioSeparator {
                                 val cleanMid = attenuatedMid * centerScale
                                 val boostedSide = side * (1.0 + 0.15 * speechMixFactor)
 
-                                val outL = (cleanMid + boostedSide).roundToInt().coerceIn(-32768, 32767).toShort()
-                                val outR = (cleanMid - boostedSide).roundToInt().coerceIn(-32768, 32767).toShort()
-                                samples[f * header.channels] = outL
-                                samples[f * header.channels + 1] = outR
+                                samples[idx] = (cleanMid + boostedSide).roundToInt().coerceIn(-32768, 32767).toShort()
+                                samples[idx + 1] = (cleanMid - boostedSide).roundToInt().coerceIn(-32768, 32767).toShort()
                             } else {
                                 // Dual-mono input: speech-band attenuation + ducking during active speech
                                 val speechBand = (monoNotchLow.process(l) + monoNotchHigh.process(l)) * 0.60
                                 val ducked = (l - speechBand * (0.78 * speechMixFactor)) *
                                     (1.0 - 0.30 * speechMixFactor)
                                 val outS = ducked.roundToInt().coerceIn(-32768, 32767).toShort()
-                                samples[f * header.channels] = outS
-                                samples[f * header.channels + 1] = outS
+                                samples[idx] = outS
+                                samples[idx + 1] = outS
                             }
                         } else {
                             val m = samples[f].toDouble()
@@ -182,8 +211,10 @@ object AudioSeparator {
                         }
                     }
 
-                    val outBytes = WavUtils.shortArrayToBytes(samples)
-                    outRaf.write(outBytes, 0, toRead)
+                    byteBuf.position(0)
+                    byteBuf.limit(toRead)
+                    byteBuf.asShortBuffer().put(samples, 0, sampleCount)
+                    outRaf.write(ioBytes, 0, toRead)
                     remaining -= toRead
                     frameCursor += frames
                 }

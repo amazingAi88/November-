@@ -92,7 +92,7 @@ class OnDeviceDubbingEngine(private val context: Context) {
         val recognizer = Recognizer(model, sampleRate)
         try {
             recognizer.setWords(true)
-            val buffer = ByteArray(4096)
+            val buffer = ByteArray(32768)
             RandomAccessFile(sttWavFile, "r").use { raf ->
                 raf.seek(header.dataOffset)
                 var remaining = header.dataSize
@@ -173,6 +173,7 @@ class OnDeviceDubbingEngine(private val context: Context) {
         speakers: List<SpeakerEntity>,
         dialogueStyle: String,
         modelFile: File,
+        hybridTurbo: Boolean = true,
         onLineTranslated: (suspend (line: TranslatedLine, index: Int, total: Int) -> Unit)? = null
     ): List<TranslatedLine> = withContext(Dispatchers.IO) {
         // Free Vosk native buffers before mapping the GGUF weights on 4-6GB RAM phones
@@ -198,9 +199,14 @@ class OnDeviceDubbingEngine(private val context: Context) {
             speakers = speakers,
             dialogueStyle = dialogueStyle,
             dictionaryConfig = dictConfig,
+            hybridTurbo = hybridTurbo,
             fallbackTranslator = fallback,
             onLineTranslated = onLineTranslated
         )
+    }
+
+    fun releaseLocalLlm() {
+        localGgufTranslator.releaseBlocking()
     }
 
     /**
@@ -262,8 +268,8 @@ class OnDeviceDubbingEngine(private val context: Context) {
                 (rawHdr.durationMs.toFloat() / (targetSlotDurationMs * 1.05f)).coerceIn(1.0f, 1.32f)
             } else 1.0f
 
-            AudioChunkExtractor.decodeEncodedAudioToMixWav(
-                encodedFile = rawTtsWav,
+            AudioChunkExtractor.convertWavFileToMixWav(
+                sourceFile = rawTtsWav,
                 outWavFile = outWavFile,
                 timeScale = fitScale
             )

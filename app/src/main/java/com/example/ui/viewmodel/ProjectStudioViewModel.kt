@@ -17,6 +17,7 @@ import com.example.data.local.ChunkEntity
 import com.example.data.local.ChunkStatus
 import com.example.data.local.DialogueSegmentEntity
 import com.example.data.local.DubbingRepository
+import com.example.data.local.DubbingSpeedMode
 import com.example.data.local.EngineMode
 import com.example.data.local.MovieProjectEntity
 import com.example.data.local.PreferencesRepository
@@ -93,6 +94,10 @@ class ProjectStudioViewModel(
     val mediaAccelSettings: StateFlow<MediaAccelSettings> = preferencesRepository.preferencesFlow
         .map { MediaAccelSettings.fromPreferences(it) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), MediaAccelSettings())
+
+    val dubbingSpeedMode: StateFlow<String> = preferencesRepository.preferencesFlow
+        .map { it.dubbingSpeedMode }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), DubbingSpeedMode.HYBRID_TURBO)
 
     val playbackState: StateFlow<AudioPlaybackState> = previewPlayer.state
 
@@ -171,6 +176,12 @@ class ProjectStudioViewModel(
                     defaultEmotionBias = defaultEmotionBias ?: current.defaultEmotionBias
                 )
             )
+        }
+    }
+
+    fun updateDubbingSpeedMode(mode: String) {
+        viewModelScope.launch {
+            preferencesRepository.setDubbingSpeedMode(mode)
         }
     }
 

@@ -7,6 +7,7 @@ import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult
 import androidx.media3.transformer.Transformer
 import androidx.test.core.app.ApplicationProvider
+import com.example.data.local.DubbingSpeedMode
 import com.example.data.local.MediaAccelMode
 import com.example.data.local.PreferencesRepository
 import com.example.media.Media3HardwareConfig
@@ -32,12 +33,15 @@ class Media3HardwareConfigRobolectricTest {
         val repo = PreferencesRepository(context)
 
         val initial = repo.preferencesFlow.first()
+        assertEquals(300, initial.defaultChunkDurationSec)
+        assertEquals(DubbingSpeedMode.HYBRID_TURBO, initial.dubbingSpeedMode)
         assertEquals(MediaAccelMode.HARDWARE_PRIORITY, initial.mediaAccelMode)
         assertTrue(initial.mediaAsyncCodecQueueing)
         assertTrue(initial.mediaHighOperatingRate)
         assertTrue(initial.mediaAllowCodecFallback)
         assertEquals(30, initial.mediaTransformerTimeoutSec)
 
+        repo.setDubbingSpeedMode(DubbingSpeedMode.FULL_GGUF)
         repo.setMediaAccelMode(MediaAccelMode.SOFTWARE_SAFE)
         repo.setMediaAsyncCodecQueueing(false)
         repo.setMediaHighOperatingRate(false)
@@ -45,6 +49,7 @@ class Media3HardwareConfigRobolectricTest {
         repo.setMediaTransformerTimeoutSec(0) // Unlimited muxer timeout
 
         val updated = repo.preferencesFlow.first()
+        assertEquals(DubbingSpeedMode.FULL_GGUF, updated.dubbingSpeedMode)
         assertEquals(MediaAccelMode.SOFTWARE_SAFE, updated.mediaAccelMode)
         assertFalse(updated.mediaAsyncCodecQueueing)
         assertFalse(updated.mediaHighOperatingRate)

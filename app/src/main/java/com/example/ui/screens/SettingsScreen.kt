@@ -78,6 +78,7 @@ import com.example.ai.LocalLlmModelManager
 import com.example.ai.OnDeviceModelManager
 import com.example.ai.SlangDictionaryManager
 import com.example.data.local.DialogueStyle
+import com.example.data.local.DubbingSpeedMode
 import com.example.data.local.EngineMode
 import com.example.data.local.ExportQuality
 import com.example.data.local.MediaAccelMode
@@ -575,6 +576,40 @@ fun SettingsScreen(
 
                             Text(
                                 text = "Runs Qwen 2.5, Gemma, or any custom .gguf file directly on your phone CPU. Understands Bollywood/OTT slang and raw adult dialogue context without cloud censorship or API quotas.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+
+                            HorizontalDivider(color = ObsidianBorder)
+                            Text("GGUF Translation Speed Mode", style = MaterialTheme.typography.titleSmall)
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                DubbingSpeedMode.all.forEach { speedMode ->
+                                    FilterChip(
+                                        selected = prefs.dubbingSpeedMode == speedMode,
+                                        onClick = { viewModel.setDubbingSpeedMode(speedMode) },
+                                        label = { Text(DubbingSpeedMode.displayLabel(speedMode)) },
+                                        colors = FilterChipDefaults.filterChipColors(
+                                            selectedContainerColor = SaffronContainer,
+                                            selectedLabelColor = SaffronGold
+                                        ),
+                                        modifier = Modifier.testTag("settings_speed_mode_$speedMode")
+                                    )
+                                }
+                            }
+                            Text(
+                                text = if (prefs.dubbingSpeedMode == DubbingSpeedMode.HYBRID_TURBO) {
+                                    val mlReady = modelsStatus?.mlKitHindiDownloaded == true
+                                    if (mlReady) {
+                                        "Hybrid Turbo is active & ready: routine dialogue runs at ~10 ms on ML Kit while slang, profanity, intimacy & long lines run on your Local GGUF LLM."
+                                    } else {
+                                        "Hybrid Turbo selected — download the ~30 MB ML Kit EN→HI model below to unlock 3-5x faster routine translation alongside Local GGUF."
+                                    }
+                                } else {
+                                    "Full GGUF Mode: sends every single line through your Local GGUF LLM for maximum nuance (takes longer on phone CPU)."
+                                },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )

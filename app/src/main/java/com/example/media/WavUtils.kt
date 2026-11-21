@@ -109,6 +109,39 @@ object WavUtils {
         }
     }
 
+    fun isPcm16Wav(file: File): Boolean = runCatching {
+        if (!file.exists() || file.length() <= 44L) return@runCatching false
+        RandomAccessFile(file, "r").use { raf ->
+            val buf = ByteArray(12)
+            raf.readFully(buf)
+            if (String(buf, 0, 4, Charsets.US_ASCII) != "RIFF") return@runCatching false
+            if (String(buf, 8, 4, Charsets.US_ASCII) != "WAVE") return@runCatching false
+            val chunkHeader = ByteArray(8)
+            while (raf.filePointer + 8 <= raf.length()) {
+                raf.readFully(chunkHeader)
+                val id = String(chunkHeader, 0, 4, Charsets.US_ASCII)
+                val size = ByteBuffer.wrap(chunkHeader, 4, 4)
+                    .order(ByteOrder.LITTLE_ENDIAN)
+                    .int.toLong() and 0xFFFFFFFFL
+                if (id == "fmt ") {
+                    val fmt = ByteArray(size.toInt().coerceAtLeast(16))
+                    raf.readFully(fmt)
+                    val bb = ByteBuffer.wrap(fmt).order(ByteOrder.LITTLE_ENDIAN)
+                    val audioFormat = bb.short.toInt() and 0xFFFF
+                    val channels = bb.short.toInt() and 0xFFFF
+                    val sampleRate = bb.int
+                    bb.int // byteRate
+                    bb.short // blockAlign
+                    val bits = bb.short.toInt() and 0xFFFF
+                    return@runCatching audioFormat == 1 && bits == 16 && channels in 1..2 && sampleRate > 0
+                } else {
+                    raf.seek(raf.filePointer + size + (size % 2))
+                }
+            }
+            false
+        }
+    }.getOrDefault(false)
+
     fun writePcmBytesAsWav(
         pcmBytes: ByteArray,
         sampleRate: Int,

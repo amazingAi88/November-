@@ -77,6 +77,9 @@ object AudioMixer {
 
                     val origBuf = ByteArray(windowBytes)
                     val bgmBuf = ByteArray(windowBytes)
+                    val outBytesBuf = ByteArray(windowBytes)
+                    val outByteBuffer = java.nio.ByteBuffer.wrap(outBytesBuf).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                    val outShorts = ShortArray(windowFrames * channels)
                     val mixAccum = FloatArray(windowFrames * channels)
                     var frameOffset = 0L
 
@@ -147,7 +150,6 @@ object AudioMixer {
                         }
 
                         // Soft-knee limiter to prevent digital clipping
-                        val outShorts = ShortArray(sampleCount)
                         for (i in 0 until sampleCount) {
                             val normalized = mixAccum[i] / 32768f
                             val limited = if (kotlin.math.abs(normalized) > 0.92f) {
@@ -159,7 +161,10 @@ object AudioMixer {
                                 .toShort()
                         }
 
-                        outRaf.write(WavUtils.shortArrayToBytes(outShorts))
+                        outByteBuffer.position(0)
+                        outByteBuffer.limit(bytesInWindow)
+                        outByteBuffer.asShortBuffer().put(outShorts, 0, sampleCount)
+                        outRaf.write(outBytesBuf, 0, bytesInWindow)
                         frameOffset += framesInWindow
                     }
                 }

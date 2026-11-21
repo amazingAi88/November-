@@ -27,8 +27,21 @@ object MediaAccelMode {
     }
 }
 
+object DubbingSpeedMode {
+    const val HYBRID_TURBO = "HYBRID_TURBO"
+    const val FULL_GGUF = "FULL_GGUF"
+
+    val all = listOf(HYBRID_TURBO, FULL_GGUF)
+
+    fun displayLabel(mode: String): String = when (mode) {
+        HYBRID_TURBO -> "Hybrid Turbo (3-5x Faster)"
+        FULL_GGUF -> "Full GGUF (Every Line)"
+        else -> "Hybrid Turbo (3-5x Faster)"
+    }
+}
+
 data class StudioPreferences(
-    val defaultChunkDurationSec: Int = 180,
+    val defaultChunkDurationSec: Int = 300,
     val defaultEngineMode: String = EngineMode.ON_DEVICE_FREE,
     val defaultDialogueStyle: String = DialogueStyle.CONVERSATIONAL,
     val defaultSpeechSpeed: Float = 1.0f,
@@ -36,6 +49,7 @@ data class StudioPreferences(
     val defaultExportQuality: String = ExportQuality.ORIGINAL,
     val autoCleanupAfterExport: Boolean = false,
     val activeGgufModelFileName: String = "",
+    val dubbingSpeedMode: String = DubbingSpeedMode.HYBRID_TURBO,
     val mediaAccelMode: String = MediaAccelMode.HARDWARE_PRIORITY,
     val mediaAsyncCodecQueueing: Boolean = true,
     val mediaHighOperatingRate: Boolean = true,
@@ -53,6 +67,7 @@ class PreferencesRepository(private val context: Context) {
         val EXPORT_QUALITY = stringPreferencesKey("export_quality")
         val AUTO_CLEANUP = booleanPreferencesKey("auto_cleanup_after_export")
         val ACTIVE_GGUF_MODEL = stringPreferencesKey("active_gguf_model")
+        val DUBBING_SPEED_MODE = stringPreferencesKey("dubbing_speed_mode")
         val MEDIA_ACCEL_MODE = stringPreferencesKey("media_accel_mode")
         val MEDIA_ASYNC_CODEC_QUEUEING = booleanPreferencesKey("media_async_codec_queueing")
         val MEDIA_HIGH_OPERATING_RATE = booleanPreferencesKey("media_high_operating_rate")
@@ -62,7 +77,7 @@ class PreferencesRepository(private val context: Context) {
 
     val preferencesFlow: Flow<StudioPreferences> = context.dataStore.data.map { prefs ->
         StudioPreferences(
-            defaultChunkDurationSec = prefs[Keys.CHUNK_DURATION_SEC] ?: 180,
+            defaultChunkDurationSec = prefs[Keys.CHUNK_DURATION_SEC] ?: 300,
             defaultEngineMode = prefs[Keys.ENGINE_MODE] ?: EngineMode.ON_DEVICE_FREE,
             defaultDialogueStyle = prefs[Keys.DIALOGUE_STYLE] ?: DialogueStyle.CONVERSATIONAL,
             defaultSpeechSpeed = prefs[Keys.SPEECH_SPEED] ?: 1.0f,
@@ -70,6 +85,7 @@ class PreferencesRepository(private val context: Context) {
             defaultExportQuality = prefs[Keys.EXPORT_QUALITY] ?: ExportQuality.ORIGINAL,
             autoCleanupAfterExport = prefs[Keys.AUTO_CLEANUP] ?: false,
             activeGgufModelFileName = prefs[Keys.ACTIVE_GGUF_MODEL] ?: "",
+            dubbingSpeedMode = prefs[Keys.DUBBING_SPEED_MODE] ?: DubbingSpeedMode.HYBRID_TURBO,
             mediaAccelMode = prefs[Keys.MEDIA_ACCEL_MODE] ?: MediaAccelMode.HARDWARE_PRIORITY,
             mediaAsyncCodecQueueing = prefs[Keys.MEDIA_ASYNC_CODEC_QUEUEING] ?: true,
             mediaHighOperatingRate = prefs[Keys.MEDIA_HIGH_OPERATING_RATE] ?: true,
@@ -108,6 +124,11 @@ class PreferencesRepository(private val context: Context) {
 
     suspend fun setActiveGgufModelFileName(fileName: String) {
         context.dataStore.edit { it[Keys.ACTIVE_GGUF_MODEL] = fileName }
+    }
+
+    suspend fun setDubbingSpeedMode(mode: String) {
+        val valid = if (mode in DubbingSpeedMode.all) mode else DubbingSpeedMode.HYBRID_TURBO
+        context.dataStore.edit { it[Keys.DUBBING_SPEED_MODE] = valid }
     }
 
     suspend fun setMediaAccelMode(mode: String) {

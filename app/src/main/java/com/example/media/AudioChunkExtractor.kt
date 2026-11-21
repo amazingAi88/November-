@@ -219,6 +219,60 @@ object AudioChunkExtractor {
     }
 
     /**
+     * Fast path for Android TTS output: reads uncompressed 16-bit PCM WAV directly with zero
+     * MediaExtractor/MediaCodec overhead, falling back to [decodeEncodedAudioToMixWav] only
+     * if the OEM TTS engine produced a non-PCM / encoded container.
+     */
+    suspend fun convertWavFileToMixWav(
+        sourceFile: File,
+        outWavFile: File,
+        timeScale: Float = 1.0f
+    ) = withContext(Dispatchers.IO) {
+        if (!WavUtils.isPcm16Wav(sourceFile)) {
+            decodeEncodedAudioToMixWav(sourceFile, outWavFile, timeScale)
+            return@withContext
+        }
+
+        val hdr = WavUtils.readHeader(sourceFile)
+        outWavFile.parentFile?.mkdirs()
+        var dataBytes = 0L
+        val bufferBytes = (32 * 1024 / hdr.bytesPerFrame.coerceAtLeast(2)) * hdr.bytesPerFrame.coerceAtLeast(2)
+        val inBuf = ByteArray(bufferBytes.coerceAtLeast(4096))
+
+        RandomAccessFile(sourceFile, "r").use { inRaf ->
+            RandomAccessFile(outWavFile, "rw").use { outRaf ->
+                outRaf.setLength(0)
+                WavUtils.writeHeader(outRaf, MIX_SAMPLE_RATE, MIX_CHANNELS, 16, 0L)
+                inRaf.seek(hdr.dataOffset)
+
+                var remaining = hdr.dataSize
+                while (remaining > 0L) {
+                    coroutineContext.ensureActive()
+                    val toRead = minOf(remaining, inBuf.size.toLong()).toInt()
+                    val aligned = (toRead / hdr.bytesPerFrame.coerceAtLeast(1)) * hdr.bytesPerFrame.coerceAtLeast(1)
+                    if (aligned <= 0) break
+                    inRaf.readFully(inBuf, 0, aligned)
+                    remaining -= aligned
+
+                    val shorts = WavUtils.bytesToShortArray(inBuf, aligned)
+                    val converted = WavUtils.convertAndTimeScalePcm(
+                        input = shorts,
+                        srcRate = hdr.sampleRate,
+                        srcChannels = hdr.channels,
+                        dstRate = MIX_SAMPLE_RATE,
+                        dstChannels = MIX_CHANNELS,
+                        timeScale = timeScale
+                    )
+                    val outBytes = WavUtils.shortArrayToBytes(converted)
+                    outRaf.write(outBytes)
+                    dataBytes += outBytes.size
+                }
+                WavUtils.patchDataSize(outRaf, dataBytes)
+            }
+        }
+    }
+
+    /**
      * Decodes any encoded audio file (MP3, AAC, OGG, FLAC, etc.) into 44.1kHz Stereo PCM16 WAV.
      */
     suspend fun decodeEncodedAudioToMixWav(

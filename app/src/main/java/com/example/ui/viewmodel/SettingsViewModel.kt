@@ -365,6 +365,8 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    fun setActiveGgufModelFileName(name: String) = viewModelScope.launch { preferencesRepository.setActiveGgufModelFileName(name) }
+    fun setDubbingSpeedMode(mode: String) = viewModelScope.launch { preferencesRepository.setDubbingSpeedMode(mode) }
     fun setEngineMode(mode: String) = viewModelScope.launch { preferencesRepository.setEngineMode(mode) }
     fun setChunkDurationSec(sec: Int) = viewModelScope.launch { preferencesRepository.setChunkDurationSec(sec) }
     fun setDialogueStyle(style: String) = viewModelScope.launch { preferencesRepository.setDialogueStyle(style) }
