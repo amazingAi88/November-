@@ -38,3 +38,18 @@ val WarmAlabaster = Color(0xFFFAF7F2)
 val SoftParchment = Color(0xFFF1ECE4)
 val DeepIndigoInk = Color(0xFF1A1626)
 val MutedIndigoInk = Color(0xFF534C68)
+
+// High-contrast Switch, RadioButton, Checkbox & Option Chip palette
+val SwitchOnTrack = Color(0xFF10B981)
+val SwitchOnThumb = Color(0xFFFFFFFF)
+val SwitchOnBorder = Color(0xFF34D399)
+val SwitchOffTrack = Color(0xFF2A253D)
+val SwitchOffThumb = Color(0xFFD0CADF)
+val SwitchOffBorder = Color(0xFF7B7399)
+
+val OptionSelectedContainer = SaffronGold
+val OptionSelectedContent = Color(0xFF1E1100)
+val OptionUnselectedContainer = Color(0xFF1D192B)
+val OptionUnselectedContent = Color(0xFFE6E1F2)
+val OptionUnselectedBorder = Color(0xFF5D557A)
+

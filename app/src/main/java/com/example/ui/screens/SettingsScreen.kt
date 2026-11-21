@@ -44,7 +44,6 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -58,8 +57,6 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -89,7 +86,10 @@ import com.example.data.local.SttEngineMode
 import com.example.media.WavUtils
 import com.example.ui.components.StatusPill
 import com.example.ui.components.StudioDisclosureCard
+import com.example.ui.components.StudioSwitch
 import com.example.ui.components.StudioTopBar
+import com.example.ui.components.studioFilterChipBorder
+import com.example.ui.components.studioFilterChipColors
 import com.example.ui.theme.ElectricCyan
 import com.example.ui.theme.EmeraldContainer
 import com.example.ui.theme.EmeraldSuccess
@@ -99,7 +99,6 @@ import com.example.ui.theme.ObsidianElevated
 import com.example.ui.theme.ObsidianNight
 import com.example.ui.theme.ObsidianSurface
 import com.example.ui.theme.ObsidianSurfaceVariant
-import com.example.ui.theme.SaffronContainer
 import com.example.ui.theme.SaffronGold
 import com.example.ui.viewmodel.GeminiCloudUiState
 import com.example.ui.viewmodel.SettingsViewModel
@@ -200,33 +199,30 @@ fun SettingsScreen(
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 verticalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
+                                val onDeviceSelected = prefs.defaultEngineMode == EngineMode.ON_DEVICE_FREE
                                 FilterChip(
-                                    selected = prefs.defaultEngineMode == EngineMode.ON_DEVICE_FREE,
+                                    selected = onDeviceSelected,
                                     onClick = { viewModel.setEngineMode(EngineMode.ON_DEVICE_FREE) },
                                     label = { Text("On-Device Free (₹0)") },
-                                    colors = FilterChipDefaults.filterChipColors(
-                                        selectedContainerColor = SaffronContainer,
-                                        selectedLabelColor = SaffronGold
-                                    )
+                                    colors = studioFilterChipColors(),
+                                    border = studioFilterChipBorder(selected = onDeviceSelected)
                                 )
+                                val llmSelected = prefs.defaultEngineMode == EngineMode.ON_DEVICE_LLM
                                 FilterChip(
-                                    selected = prefs.defaultEngineMode == EngineMode.ON_DEVICE_LLM,
+                                    selected = llmSelected,
                                     onClick = { viewModel.setEngineMode(EngineMode.ON_DEVICE_LLM) },
                                     label = { Text("Local GGUF LLM (Uncensored)") },
-                                    colors = FilterChipDefaults.filterChipColors(
-                                        selectedContainerColor = SaffronContainer,
-                                        selectedLabelColor = SaffronGold
-                                    ),
+                                    colors = studioFilterChipColors(),
+                                    border = studioFilterChipBorder(selected = llmSelected),
                                     modifier = Modifier.testTag("default_engine_local_llm_chip")
                                 )
+                                val geminiSelected = prefs.defaultEngineMode == EngineMode.GEMINI_CLOUD
                                 FilterChip(
-                                    selected = prefs.defaultEngineMode == EngineMode.GEMINI_CLOUD,
+                                    selected = geminiSelected,
                                     onClick = { viewModel.setEngineMode(EngineMode.GEMINI_CLOUD) },
                                     label = { Text("Gemini Cloud AI (Optional)") },
-                                    colors = FilterChipDefaults.filterChipColors(
-                                        selectedContainerColor = SaffronContainer,
-                                        selectedLabelColor = SaffronGold
-                                    ),
+                                    colors = studioFilterChipColors(),
+                                    border = studioFilterChipBorder(selected = geminiSelected),
                                     modifier = Modifier.testTag("default_engine_gemini_chip")
                                 )
                             }
@@ -234,14 +230,13 @@ fun SettingsScreen(
                             Text("Default Chunk Duration", style = MaterialTheme.typography.titleMedium)
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 listOf(120, 180, 240, 300).forEach { sec ->
+                                    val isSel = prefs.defaultChunkDurationSec == sec
                                     FilterChip(
-                                        selected = prefs.defaultChunkDurationSec == sec,
+                                        selected = isSel,
                                         onClick = { viewModel.setChunkDurationSec(sec) },
                                         label = { Text("${sec / 60} min") },
-                                        colors = FilterChipDefaults.filterChipColors(
-                                            selectedContainerColor = SaffronContainer,
-                                            selectedLabelColor = SaffronGold
-                                        )
+                                        colors = studioFilterChipColors(),
+                                        border = studioFilterChipBorder(selected = isSel)
                                     )
                                 }
                             }
@@ -252,14 +247,13 @@ fun SettingsScreen(
                                 verticalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 DialogueStyle.all.forEach { style ->
+                                    val isSel = prefs.defaultDialogueStyle == style
                                     FilterChip(
-                                        selected = prefs.defaultDialogueStyle == style,
+                                        selected = isSel,
                                         onClick = { viewModel.setDialogueStyle(style) },
                                         label = { Text(style) },
-                                        colors = FilterChipDefaults.filterChipColors(
-                                            selectedContainerColor = SaffronContainer,
-                                            selectedLabelColor = SaffronGold
-                                        )
+                                        colors = studioFilterChipColors(),
+                                        border = studioFilterChipBorder(selected = isSel)
                                     )
                                 }
                             }
@@ -288,24 +282,22 @@ fun SettingsScreen(
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
                                 Text("Preserve BGM by Default", style = MaterialTheme.typography.bodyMedium)
-                                Switch(
+                                StudioSwitch(
                                     checked = prefs.defaultPreserveBgm,
-                                    onCheckedChange = { viewModel.setPreserveBgm(it) },
-                                    colors = SwitchDefaults.colors(checkedThumbColor = SaffronGold)
+                                    onCheckedChange = { viewModel.setPreserveBgm(it) }
                                 )
                             }
 
                             Text("Default Export Quality", style = MaterialTheme.typography.titleMedium)
                             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 ExportQuality.all.forEach { q ->
+                                    val isSel = prefs.defaultExportQuality == q
                                     FilterChip(
-                                        selected = prefs.defaultExportQuality == q,
+                                        selected = isSel,
                                         onClick = { viewModel.setExportQuality(q) },
                                         label = { Text(q) },
-                                        colors = FilterChipDefaults.filterChipColors(
-                                            selectedContainerColor = SaffronContainer,
-                                            selectedLabelColor = SaffronGold
-                                        )
+                                        colors = studioFilterChipColors(),
+                                        border = studioFilterChipBorder(selected = isSel)
                                     )
                                 }
                             }
@@ -395,14 +387,13 @@ fun SettingsScreen(
                                 verticalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 MediaAccelMode.all.forEach { mode ->
+                                    val isSel = prefs.mediaAccelMode == mode
                                     FilterChip(
-                                        selected = prefs.mediaAccelMode == mode,
+                                        selected = isSel,
                                         onClick = { viewModel.setMediaAccelMode(mode) },
                                         label = { Text(MediaAccelMode.displayLabel(mode)) },
-                                        colors = FilterChipDefaults.filterChipColors(
-                                            selectedContainerColor = SaffronContainer,
-                                            selectedLabelColor = SaffronGold
-                                        ),
+                                        colors = studioFilterChipColors(),
+                                        border = studioFilterChipBorder(selected = isSel),
                                         modifier = Modifier.testTag("settings_accel_mode_$mode")
                                     )
                                 }
@@ -433,10 +424,9 @@ fun SettingsScreen(
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                 }
-                                Switch(
+                                StudioSwitch(
                                     checked = prefs.mediaAsyncCodecQueueing,
                                     onCheckedChange = { viewModel.setMediaAsyncCodecQueueing(it) },
-                                    colors = SwitchDefaults.colors(checkedThumbColor = SaffronGold),
                                     modifier = Modifier.testTag("settings_async_codec_switch")
                                 )
                             }
@@ -454,10 +444,9 @@ fun SettingsScreen(
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                 }
-                                Switch(
+                                StudioSwitch(
                                     checked = prefs.mediaHighOperatingRate,
                                     onCheckedChange = { viewModel.setMediaHighOperatingRate(it) },
-                                    colors = SwitchDefaults.colors(checkedThumbColor = SaffronGold),
                                     modifier = Modifier.testTag("settings_operating_rate_switch")
                                 )
                             }
@@ -475,10 +464,9 @@ fun SettingsScreen(
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                 }
-                                Switch(
+                                StudioSwitch(
                                     checked = prefs.mediaAllowCodecFallback,
                                     onCheckedChange = { viewModel.setMediaAllowCodecFallback(it) },
-                                    colors = SwitchDefaults.colors(checkedThumbColor = SaffronGold),
                                     modifier = Modifier.testTag("settings_codec_fallback_switch")
                                 )
                             }
@@ -489,14 +477,13 @@ fun SettingsScreen(
                                 verticalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 listOf(15 to "15s", 30 to "30s", 60 to "60s", 0 to "No Limit").forEach { (sec, label) ->
+                                    val isSel = prefs.mediaTransformerTimeoutSec == sec
                                     FilterChip(
-                                        selected = prefs.mediaTransformerTimeoutSec == sec,
+                                        selected = isSel,
                                         onClick = { viewModel.setMediaTransformerTimeoutSec(sec) },
                                         label = { Text(label) },
-                                        colors = FilterChipDefaults.filterChipColors(
-                                            selectedContainerColor = SaffronContainer,
-                                            selectedLabelColor = SaffronGold
-                                        ),
+                                        colors = studioFilterChipColors(),
+                                        border = studioFilterChipBorder(selected = isSel),
                                         modifier = Modifier.testTag("settings_muxer_timeout_$sec")
                                     )
                                 }
@@ -785,14 +772,13 @@ fun SettingsScreen(
                                 verticalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 DubbingSpeedMode.all.forEach { speedMode ->
+                                    val isSel = prefs.dubbingSpeedMode == speedMode
                                     FilterChip(
-                                        selected = prefs.dubbingSpeedMode == speedMode,
+                                        selected = isSel,
                                         onClick = { viewModel.setDubbingSpeedMode(speedMode) },
                                         label = { Text(DubbingSpeedMode.displayLabel(speedMode)) },
-                                        colors = FilterChipDefaults.filterChipColors(
-                                            selectedContainerColor = SaffronContainer,
-                                            selectedLabelColor = SaffronGold
-                                        ),
+                                        colors = studioFilterChipColors(),
+                                        border = studioFilterChipBorder(selected = isSel),
                                         modifier = Modifier.testTag("settings_speed_mode_$speedMode")
                                     )
                                 }
@@ -1060,9 +1046,13 @@ fun SettingsScreen(
                                                 selected = isActive,
                                                 onClick = { viewModel.selectActiveGguf(custom.fileName) },
                                                 label = { Text(if (isActive) "Active" else "Select") },
-                                                colors = FilterChipDefaults.filterChipColors(
-                                                    selectedContainerColor = EmeraldContainer,
-                                                    selectedLabelColor = EmeraldSuccess
+                                                colors = studioFilterChipColors(
+                                                    selectedContainer = EmeraldSuccess,
+                                                    selectedContent = ObsidianNight
+                                                ),
+                                                border = studioFilterChipBorder(
+                                                    selected = isActive,
+                                                    selectedBorderColor = EmeraldSuccess
                                                 )
                                             )
                                         }
@@ -1190,10 +1180,9 @@ fun SettingsScreen(
                                         )
                                     }
                                 }
-                                Switch(
+                                StudioSwitch(
                                     checked = slangConfig.enabled,
-                                    onCheckedChange = { viewModel.setSlangDictionaryEnabled(it) },
-                                    colors = SwitchDefaults.colors(checkedThumbColor = SaffronGold)
+                                    onCheckedChange = { viewModel.setSlangDictionaryEnabled(it) }
                                 )
                             }
                             Text(
@@ -1251,14 +1240,13 @@ fun SettingsScreen(
                                 verticalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 SttEngineMode.all.forEach { sttMode ->
+                                    val isSel = prefs.sttEngineMode == sttMode
                                     FilterChip(
-                                        selected = prefs.sttEngineMode == sttMode,
+                                        selected = isSel,
                                         onClick = { viewModel.setSttEngineMode(sttMode) },
                                         label = { Text(SttEngineMode.displayLabel(sttMode)) },
-                                        colors = FilterChipDefaults.filterChipColors(
-                                            selectedContainerColor = SaffronContainer,
-                                            selectedLabelColor = SaffronGold
-                                        ),
+                                        colors = studioFilterChipColors(),
+                                        border = studioFilterChipBorder(selected = isSel),
                                         modifier = Modifier.testTag("settings_stt_engine_$sttMode")
                                     )
                                 }
@@ -1289,10 +1277,9 @@ fun SettingsScreen(
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                 }
-                                Switch(
+                                StudioSwitch(
                                     checked = prefs.sttVocalIsolationEnabled,
                                     onCheckedChange = { viewModel.setSttVocalIsolationEnabled(it) },
-                                    colors = SwitchDefaults.colors(checkedThumbColor = SaffronGold),
                                     modifier = Modifier.testTag("settings_vocal_isolation_switch")
                                 )
                             }

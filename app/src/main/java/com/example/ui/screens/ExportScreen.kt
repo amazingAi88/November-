@@ -35,7 +35,6 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -43,8 +42,6 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -64,14 +61,16 @@ import com.example.ui.components.ExoVideoPreviewPlayer
 import com.example.ui.components.StatusPill
 import com.example.ui.components.StepHeaderRow
 import com.example.ui.components.StudioDisclosureCard
+import com.example.ui.components.StudioSwitch
 import com.example.ui.components.StudioTopBar
+import com.example.ui.components.studioFilterChipBorder
+import com.example.ui.components.studioFilterChipColors
 import com.example.ui.theme.ElectricCyan
 import com.example.ui.theme.EmeraldSuccess
 import com.example.ui.theme.ObsidianBorder
 import com.example.ui.theme.ObsidianNight
 import com.example.ui.theme.ObsidianSurface
 import com.example.ui.theme.ObsidianSurfaceVariant
-import com.example.ui.theme.SaffronContainer
 import com.example.ui.theme.SaffronGold
 import com.example.ui.viewmodel.ExportUiState
 import com.example.ui.viewmodel.ProjectStudioViewModel
@@ -169,14 +168,13 @@ fun ExportScreen(
                                     ExportQuality.SD_480P to "480p SD"
                                 )
                                 ExportQuality.all.forEach { q ->
+                                    val isSelected = currentProject.exportQuality == q
                                     FilterChip(
-                                        selected = currentProject.exportQuality == q,
+                                        selected = isSelected,
                                         onClick = { viewModel.updateExportQuality(q) },
                                         label = { Text(labels[q] ?: q) },
-                                        colors = FilterChipDefaults.filterChipColors(
-                                            selectedContainerColor = SaffronContainer,
-                                            selectedLabelColor = SaffronGold
-                                        ),
+                                        colors = studioFilterChipColors(),
+                                        border = studioFilterChipBorder(selected = isSelected),
                                         modifier = Modifier.testTag("export_quality_$q")
                                     )
                                 }
@@ -227,14 +225,13 @@ fun ExportScreen(
                                 verticalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 MediaAccelMode.all.forEach { mode ->
+                                    val isSelected = mediaAccelSettings.mode == mode
                                     FilterChip(
-                                        selected = mediaAccelSettings.mode == mode,
+                                        selected = isSelected,
                                         onClick = { viewModel.updateMediaAccelMode(mode) },
                                         label = { Text(MediaAccelMode.displayLabel(mode)) },
-                                        colors = FilterChipDefaults.filterChipColors(
-                                            selectedContainerColor = SaffronContainer,
-                                            selectedLabelColor = SaffronGold
-                                        ),
+                                        colors = studioFilterChipColors(),
+                                        border = studioFilterChipBorder(selected = isSelected),
                                         modifier = Modifier.testTag("export_accel_mode_$mode")
                                     )
                                 }
@@ -252,10 +249,9 @@ fun ExportScreen(
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                 }
-                                Switch(
+                                StudioSwitch(
                                     checked = mediaAccelSettings.asyncCodecQueueing,
                                     onCheckedChange = { viewModel.updateMediaAsyncQueueing(it) },
-                                    colors = SwitchDefaults.colors(checkedThumbColor = SaffronGold),
                                     modifier = Modifier.testTag("export_async_codec_switch")
                                 )
                             }

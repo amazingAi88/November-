@@ -118,4 +118,63 @@ class SlangDictionaryRobolectricTest {
         val afterDelete = SlangDictionaryManager.deleteRule(context, "custom_bhidu")
         assertFalse(afterDelete.rules.any { it.id == "custom_bhidu" })
     }
+
+    @Test
+    fun `manual review sentence and phrase edits save permanently and match future videos`() {
+        SlangDictionaryManager.ensureInitialized(context)
+
+        // 1. Save full English sentence ending with punctuation
+        val afterSentenceSave = SlangDictionaryManager.upsertManualOverrideRule(
+            context = context,
+            sourceTerm = "What the heck are you doing?",
+            hindiReplacement = "तू ये क्या कर रहा है?",
+            wholeWord = true
+        )
+        val savedSentenceRule = afterSentenceSave.rules.first {
+            it.sourceTerm == "What the heck are you doing?"
+        }
+        assertTrue(savedSentenceRule.id.startsWith("review_"))
+        assertEquals("तू ये क्या कर रहा है?", savedSentenceRule.hindiReplacement)
+
+        // Reload from JSON file and verify direct override without duplicate '??'
+        val reloaded = SlangDictionaryManager.loadConfig(context)
+        val directPrep = SlangDictionaryManager.prepareProtectedText(
+            config = reloaded,
+            englishText = "What the heck are you doing?"
+        )
+        assertEquals("तू ये क्या कर रहा है?", directPrep.directOverrideHindi)
+
+        // 2. Save custom word/phrase and verify in-sentence override
+        SlangDictionaryManager.upsertManualOverrideRule(
+            context = context,
+            sourceTerm = "brother",
+            hindiReplacement = "भाईजान",
+            wholeWord = true
+        )
+        val updatedCfg = SlangDictionaryManager.loadConfig(context)
+        val sentencePrep = SlangDictionaryManager.prepareProtectedText(
+            config = updatedCfg,
+            englishText = "Listen carefully, brother"
+        )
+        assertTrue(sentencePrep.protectedEnglish.contains("ZXQ0QXZ"))
+        val restored = SlangDictionaryManager.restoreAndOverride(
+            machineTranslatedHindi = "ध्यान से सुनो, ZXQ0QXZ",
+            prep = sentencePrep
+        )
+        assertEquals("ध्यान से सुनो, भाईजान", restored)
+
+        // 3. Re-saving same English sentence updates existing rule in place instead of duplicating
+        val afterUpdate = SlangDictionaryManager.upsertManualOverrideRule(
+            context = context,
+            sourceTerm = "what the heck are you doing?",
+            hindiReplacement = "अबे तू ये क्या कर रहा है?",
+            wholeWord = true
+        )
+        val matchingRules = afterUpdate.rules.filter {
+            it.sourceTerm.equals("what the heck are you doing?", ignoreCase = true)
+        }
+        assertEquals(1, matchingRules.size)
+        assertEquals(savedSentenceRule.id, matchingRules.first().id)
+        assertEquals("अबे तू ये क्या कर रहा है?", matchingRules.first().hindiReplacement)
+    }
 }

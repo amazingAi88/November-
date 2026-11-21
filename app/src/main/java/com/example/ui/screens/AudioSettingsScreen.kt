@@ -40,8 +40,6 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -59,6 +57,7 @@ import com.example.data.local.ProjectStatus
 import com.example.media.WavUtils
 import com.example.ui.components.StepHeaderRow
 import com.example.ui.components.StudioDisclosureCard
+import com.example.ui.components.StudioSwitch
 import com.example.ui.components.StudioTopBar
 import com.example.ui.theme.ElectricCyan
 import com.example.ui.theme.ObsidianBorder
@@ -166,10 +165,9 @@ fun AudioSettingsScreen(
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                 }
-                                Switch(
+                                StudioSwitch(
                                     checked = currentProject.preserveBgm,
                                     onCheckedChange = { viewModel.updateAudioSettings(preserveBgm = it) },
-                                    colors = SwitchDefaults.colors(checkedThumbColor = SaffronGold),
                                     modifier = Modifier.testTag("preserve_bgm_switch")
                                 )
                             }
@@ -187,10 +185,9 @@ fun AudioSettingsScreen(
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                 }
-                                Switch(
+                                StudioSwitch(
                                     checked = currentProject.removeEnglishDialogue,
                                     onCheckedChange = { viewModel.updateAudioSettings(removeEnglishDialogue = it) },
-                                    colors = SwitchDefaults.colors(checkedThumbColor = SaffronGold),
                                     modifier = Modifier.testTag("remove_dialogue_switch")
                                 )
                             }

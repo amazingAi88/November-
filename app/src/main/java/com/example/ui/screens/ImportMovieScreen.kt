@@ -33,7 +33,6 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -56,10 +55,11 @@ import com.example.ui.components.ExoVideoPreviewPlayer
 import com.example.ui.components.StepHeaderRow
 import com.example.ui.components.StudioDisclosureCard
 import com.example.ui.components.StudioTopBar
+import com.example.ui.components.studioFilterChipBorder
+import com.example.ui.components.studioFilterChipColors
 import com.example.ui.theme.ObsidianBorder
 import com.example.ui.theme.ObsidianNight
 import com.example.ui.theme.ObsidianSurface
-import com.example.ui.theme.SaffronContainer
 import com.example.ui.theme.SaffronGold
 import com.example.ui.viewmodel.ImportUiState
 import com.example.ui.viewmodel.ImportViewModel
@@ -300,10 +300,8 @@ fun ImportMovieScreen(
                                                 selected = selected,
                                                 onClick = { viewModel.updateChunkDuration(sec) },
                                                 label = { Text("${sec / 60} min") },
-                                                colors = FilterChipDefaults.filterChipColors(
-                                                    selectedContainerColor = SaffronContainer,
-                                                    selectedLabelColor = SaffronGold
-                                                ),
+                                                colors = studioFilterChipColors(),
+                                                border = studioFilterChipBorder(selected = selected),
                                                 modifier = Modifier.testTag("chunk_chip_${sec}s")
                                             )
                                         }
@@ -374,14 +372,13 @@ fun ImportMovieScreen(
                                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                                         ) {
                                             SubtitleLanguage.all.forEach { lang ->
+                                                val isSel = state.subtitleLanguage == lang
                                                 FilterChip(
-                                                    selected = state.subtitleLanguage == lang,
+                                                    selected = isSel,
                                                     onClick = { viewModel.updateSubtitleLanguage(lang) },
                                                     label = { Text(SubtitleLanguage.displayLabel(lang)) },
-                                                    colors = FilterChipDefaults.filterChipColors(
-                                                        selectedContainerColor = SaffronContainer,
-                                                        selectedLabelColor = SaffronGold
-                                                    ),
+                                                    colors = studioFilterChipColors(),
+                                                    border = studioFilterChipBorder(selected = isSel),
                                                     modifier = Modifier.testTag("import_sub_lang_$lang")
                                                 )
                                             }

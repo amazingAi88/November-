@@ -126,6 +126,52 @@ object SlangDictionaryManager {
         return saveConfig(context, current.copy(rules = updated))
     }
 
+    /**
+     * Permanently saves or updates a manually edited translation from Review into
+     * `slang_override_dictionary.json` so future movie dubbings reuse the exact phrase or sentence.
+     */
+    fun upsertManualOverrideRule(
+        context: Context,
+        sourceTerm: String,
+        hindiReplacement: String,
+        wholeWord: Boolean = true,
+        dialogueStyles: List<String> = emptyList(),
+        note: String = "Saved from Dialogue Review"
+    ): SlangDictionaryConfig {
+        val cleanSource = sourceTerm.trim()
+        val cleanHindi = hindiReplacement.trim()
+        require(cleanSource.isNotEmpty() && cleanHindi.isNotEmpty()) {
+            "Both English text and Hindi replacement are required."
+        }
+        val current = loadConfig(context)
+        val existing = current.rules.firstOrNull {
+            it.sourceTerm.equals(cleanSource, ignoreCase = true) &&
+                it.contextKeywords.isEmpty() &&
+                it.dialogueStyles == dialogueStyles
+        }
+        val rule = if (existing != null) {
+            existing.copy(
+                sourceTerm = cleanSource,
+                hindiReplacement = cleanHindi,
+                wholeWord = wholeWord,
+                enabled = true,
+                note = note.trim().ifBlank { existing.note }
+            )
+        } else {
+            SlangOverrideRule(
+                id = "review_${UUID.randomUUID().toString().take(8)}",
+                sourceTerm = cleanSource,
+                hindiReplacement = cleanHindi,
+                contextKeywords = emptyList(),
+                dialogueStyles = dialogueStyles,
+                wholeWord = wholeWord,
+                enabled = true,
+                note = note.trim()
+            )
+        }
+        return upsertRule(context, rule)
+    }
+
     fun toggleRuleEnabled(context: Context, ruleId: String, enabled: Boolean): SlangDictionaryConfig {
         val current = loadConfig(context)
         val updated = current.rules.map { if (it.id == ruleId) it.copy(enabled = enabled) else it }
@@ -266,14 +312,22 @@ object SlangDictionaryManager {
 
         // Exact full-line match (ignoring surrounding whitespace/punctuation)
         val trimmedCore = englishText.trim().trim('"', '\'', '.', '!', '?', ',', ';', ':')
+        val matchedCore = matches.firstOrNull()?.matchedText?.trim()?.trim('"', '\'', '.', '!', '?', ',', ';', ':')
         if (matches.size == 1 &&
-            matches[0].matchedText.trim().equals(trimmedCore, ignoreCase = true)
+            matchedCore != null &&
+            matchedCore.equals(trimmedCore, ignoreCase = true)
         ) {
             val trailing = englishText.trim().takeLastWhile { it in charArrayOf('!', '?') }
+            val baseHindi = matches[0].rule.hindiReplacement.trimEnd()
+            val finalHindi = if (trailing.isNotEmpty() && !baseHindi.endsWith("!") && !baseHindi.endsWith("?")) {
+                baseHindi + trailing
+            } else {
+                baseHindi
+            }
             return ProtectedTranslationPrep(
                 originalEnglish = englishText,
                 protectedEnglish = englishText,
-                directOverrideHindi = matches[0].rule.hindiReplacement + trailing,
+                directOverrideHindi = finalHindi,
                 appliedMatches = matches,
                 placeholders = emptyList()
             )
@@ -360,9 +414,15 @@ object SlangDictionaryManager {
     ): String {
         if (matches.isEmpty()) return llmHindi
         val trimmedCore = englishText.trim().trim('"', '\'', '.', '!', '?', ',', ';', ':')
-        if (matches.size == 1 && matches[0].matchedText.trim().equals(trimmedCore, ignoreCase = true)) {
+        val matchedCore = matches.firstOrNull()?.matchedText?.trim()?.trim('"', '\'', '.', '!', '?', ',', ';', ':')
+        if (matches.size == 1 && matchedCore != null && matchedCore.equals(trimmedCore, ignoreCase = true)) {
             val trailing = englishText.trim().takeLastWhile { it in charArrayOf('!', '?') }
-            return matches[0].rule.hindiReplacement + trailing
+            val baseHindi = matches[0].rule.hindiReplacement.trimEnd()
+            return if (trailing.isNotEmpty() && !baseHindi.endsWith("!") && !baseHindi.endsWith("?")) {
+                baseHindi + trailing
+            } else {
+                baseHindi
+            }
         }
         var updated = llmHindi
         for (m in matches) {
@@ -388,9 +448,16 @@ object SlangDictionaryManager {
     }
 
     private fun buildTermRegex(term: String, wholeWord: Boolean): Regex {
-        val escaped = Regex.escape(term.trim())
-        val pattern = if (wholeWord) """(?i)\b$escaped\b""" else """(?i)$escaped"""
-        return Regex(pattern)
+        val clean = term.trim()
+        val escaped = Regex.escape(clean)
+        if (!wholeWord || clean.isEmpty()) {
+            return Regex("""(?i)$escaped""")
+        }
+        val firstChar = clean.first()
+        val lastChar = clean.last()
+        val startBoundary = if (firstChar.isLetterOrDigit() || firstChar == '_') """\b""" else ""
+        val endBoundary = if (lastChar.isLetterOrDigit() || lastChar == '_') """\b""" else ""
+        return Regex("""(?i)$startBoundary$escaped$endBoundary""")
     }
 
     fun toPrettyJson(config: SlangDictionaryConfig): String {

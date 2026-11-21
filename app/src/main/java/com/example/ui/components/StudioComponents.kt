@@ -19,15 +19,25 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CheckboxColors
+import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.RadioButtonColors
+import androidx.compose.material3.RadioButtonDefaults
+import androidx.compose.material3.SelectableChipColors
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchColors
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
@@ -58,8 +68,19 @@ import com.example.ui.theme.ObsidianBorder
 import com.example.ui.theme.ObsidianElevated
 import com.example.ui.theme.ObsidianNight
 import com.example.ui.theme.ObsidianSurface
+import com.example.ui.theme.OptionSelectedContainer
+import com.example.ui.theme.OptionSelectedContent
+import com.example.ui.theme.OptionUnselectedBorder
+import com.example.ui.theme.OptionUnselectedContainer
+import com.example.ui.theme.OptionUnselectedContent
 import com.example.ui.theme.SaffronContainer
 import com.example.ui.theme.SaffronGold
+import com.example.ui.theme.SwitchOffBorder
+import com.example.ui.theme.SwitchOffThumb
+import com.example.ui.theme.SwitchOffTrack
+import com.example.ui.theme.SwitchOnBorder
+import com.example.ui.theme.SwitchOnThumb
+import com.example.ui.theme.SwitchOnTrack
 import com.example.ui.theme.WarningAmber
 import com.example.ui.theme.WarningContainer
 
@@ -271,3 +292,82 @@ fun ExoVideoPreviewPlayer(
             .background(Color.Black)
     )
 }
+
+@Composable
+fun studioSwitchColors(): SwitchColors = SwitchDefaults.colors(
+    checkedThumbColor = SwitchOnThumb,
+    checkedTrackColor = SwitchOnTrack,
+    checkedBorderColor = SwitchOnBorder,
+    checkedIconColor = Color(0xFF065F46),
+    uncheckedThumbColor = SwitchOffThumb,
+    uncheckedTrackColor = SwitchOffTrack,
+    uncheckedBorderColor = SwitchOffBorder,
+    uncheckedIconColor = ObsidianNight
+)
+
+@Composable
+fun StudioSwitch(
+    checked: Boolean,
+    onCheckedChange: ((Boolean) -> Unit)?,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true
+) {
+    Switch(
+        checked = checked,
+        onCheckedChange = onCheckedChange,
+        modifier = modifier,
+        enabled = enabled,
+        colors = studioSwitchColors(),
+        thumbContent = {
+            if (checked) {
+                Icon(
+                    imageVector = Icons.Filled.Check,
+                    contentDescription = null,
+                    modifier = Modifier.size(SwitchDefaults.IconSize)
+                )
+            }
+        }
+    )
+}
+
+@Composable
+fun studioFilterChipColors(
+    selectedContainer: Color = OptionSelectedContainer,
+    selectedContent: Color = OptionSelectedContent
+): SelectableChipColors = FilterChipDefaults.filterChipColors(
+    containerColor = OptionUnselectedContainer,
+    labelColor = OptionUnselectedContent,
+    iconColor = OptionUnselectedContent,
+    selectedContainerColor = selectedContainer,
+    selectedLabelColor = selectedContent,
+    selectedLeadingIconColor = selectedContent,
+    selectedTrailingIconColor = selectedContent
+)
+
+@Composable
+fun studioFilterChipBorder(
+    selected: Boolean,
+    enabled: Boolean = true,
+    selectedBorderColor: Color = OptionSelectedContainer
+): BorderStroke = FilterChipDefaults.filterChipBorder(
+    enabled = enabled,
+    selected = selected,
+    borderColor = OptionUnselectedBorder,
+    selectedBorderColor = selectedBorderColor,
+    borderWidth = 1.dp,
+    selectedBorderWidth = 1.5.dp
+)
+
+@Composable
+fun studioRadioButtonColors(): RadioButtonColors = RadioButtonDefaults.colors(
+    selectedColor = SaffronGold,
+    unselectedColor = SwitchOffThumb
+)
+
+@Composable
+fun studioCheckboxColors(): CheckboxColors = CheckboxDefaults.colors(
+    checkedColor = SwitchOnTrack,
+    checkmarkColor = SwitchOnThumb,
+    uncheckedColor = SwitchOffThumb
+)
+

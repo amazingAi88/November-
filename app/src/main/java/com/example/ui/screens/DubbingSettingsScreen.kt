@@ -41,7 +41,6 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -54,8 +53,6 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -87,7 +84,10 @@ import com.example.media.WavUtils
 import com.example.ui.components.StatusPill
 import com.example.ui.components.StepHeaderRow
 import com.example.ui.components.StudioDisclosureCard
+import com.example.ui.components.StudioSwitch
 import com.example.ui.components.StudioTopBar
+import com.example.ui.components.studioFilterChipBorder
+import com.example.ui.components.studioFilterChipColors
 import com.example.ui.theme.ElectricCyan
 import com.example.ui.theme.EmeraldContainer
 import com.example.ui.theme.EmeraldSuccess
@@ -97,7 +97,6 @@ import com.example.ui.theme.ObsidianElevated
 import com.example.ui.theme.ObsidianNight
 import com.example.ui.theme.ObsidianSurface
 import com.example.ui.theme.ObsidianSurfaceVariant
-import com.example.ui.theme.SaffronContainer
 import com.example.ui.theme.SaffronGold
 import com.example.ui.viewmodel.ProjectStudioViewModel
 import com.example.ui.viewmodel.VoicePreviewState
@@ -217,37 +216,34 @@ fun DubbingSettingsScreen(
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 verticalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
+                                val onDeviceSelected = currentProject.engineMode == EngineMode.ON_DEVICE_FREE
                                 FilterChip(
-                                    selected = currentProject.engineMode == EngineMode.ON_DEVICE_FREE,
+                                    selected = onDeviceSelected,
                                     onClick = { viewModel.updateDubbingSettings(engineMode = EngineMode.ON_DEVICE_FREE) },
                                     label = { Text("On-Device Free (Phone Only ₹0)") },
-                                    colors = FilterChipDefaults.filterChipColors(
-                                        selectedContainerColor = SaffronContainer,
-                                        selectedLabelColor = SaffronGold
-                                    ),
+                                    colors = studioFilterChipColors(),
+                                    border = studioFilterChipBorder(selected = onDeviceSelected),
                                     modifier = Modifier.testTag("engine_on_device_chip")
                                 )
+                                val llmSelected = currentProject.engineMode == EngineMode.ON_DEVICE_LLM
                                 FilterChip(
-                                    selected = currentProject.engineMode == EngineMode.ON_DEVICE_LLM,
+                                    selected = llmSelected,
                                     onClick = {
                                         viewModel.refreshActiveGgufModel()
                                         viewModel.updateDubbingSettings(engineMode = EngineMode.ON_DEVICE_LLM)
                                     },
                                     label = { Text("Local GGUF LLM (Uncensored Offline ₹0)") },
-                                    colors = FilterChipDefaults.filterChipColors(
-                                        selectedContainerColor = SaffronContainer,
-                                        selectedLabelColor = SaffronGold
-                                    ),
+                                    colors = studioFilterChipColors(),
+                                    border = studioFilterChipBorder(selected = llmSelected),
                                     modifier = Modifier.testTag("engine_local_llm_chip")
                                 )
+                                val geminiSelected = currentProject.engineMode == EngineMode.GEMINI_CLOUD
                                 FilterChip(
-                                    selected = currentProject.engineMode == EngineMode.GEMINI_CLOUD,
+                                    selected = geminiSelected,
                                     onClick = { viewModel.updateDubbingSettings(engineMode = EngineMode.GEMINI_CLOUD) },
                                     label = { Text("Gemini Cloud AI (Optional)") },
-                                    colors = FilterChipDefaults.filterChipColors(
-                                        selectedContainerColor = SaffronContainer,
-                                        selectedLabelColor = SaffronGold
-                                    ),
+                                    colors = studioFilterChipColors(),
+                                    border = studioFilterChipBorder(selected = geminiSelected),
                                     modifier = Modifier.testTag("engine_gemini_chip")
                                 )
                             }
@@ -330,14 +326,13 @@ fun DubbingSettingsScreen(
                                             verticalArrangement = Arrangement.spacedBy(6.dp)
                                         ) {
                                             DubbingSpeedMode.all.forEach { mode ->
+                                                val isSel = dubbingSpeedMode == mode
                                                 FilterChip(
-                                                    selected = dubbingSpeedMode == mode,
+                                                    selected = isSel,
                                                     onClick = { viewModel.updateDubbingSpeedMode(mode) },
                                                     label = { Text(DubbingSpeedMode.displayLabel(mode)) },
-                                                    colors = FilterChipDefaults.filterChipColors(
-                                                        selectedContainerColor = SaffronContainer,
-                                                        selectedLabelColor = SaffronGold
-                                                    ),
+                                                    colors = studioFilterChipColors(),
+                                                    border = studioFilterChipBorder(selected = isSel),
                                                     modifier = Modifier.testTag("project_speed_mode_$mode")
                                                 )
                                             }
@@ -415,14 +410,13 @@ fun DubbingSettingsScreen(
                                         verticalArrangement = Arrangement.spacedBy(6.dp)
                                     ) {
                                         SttEngineMode.all.forEach { sttMode ->
+                                            val isSel = sttEngineMode == sttMode
                                             FilterChip(
-                                                selected = sttEngineMode == sttMode,
+                                                selected = isSel,
                                                 onClick = { viewModel.updateSttEngineMode(sttMode) },
                                                 label = { Text(SttEngineMode.displayLabel(sttMode)) },
-                                                colors = FilterChipDefaults.filterChipColors(
-                                                    selectedContainerColor = SaffronContainer,
-                                                    selectedLabelColor = SaffronGold
-                                                ),
+                                                colors = studioFilterChipColors(),
+                                                border = studioFilterChipBorder(selected = isSel),
                                                 modifier = Modifier.testTag("project_stt_engine_$sttMode")
                                             )
                                         }
@@ -441,10 +435,9 @@ fun DubbingSettingsScreen(
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                                             )
                                         }
-                                        Switch(
+                                        StudioSwitch(
                                             checked = sttVocalIsolationEnabled,
                                             onCheckedChange = { viewModel.updateSttVocalIsolationEnabled(it) },
-                                            colors = SwitchDefaults.colors(checkedThumbColor = SaffronGold),
                                             modifier = Modifier.testTag("project_vocal_isolation_switch")
                                         )
                                     }
@@ -517,14 +510,13 @@ fun DubbingSettingsScreen(
                                     verticalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
                                     SubtitleLanguage.all.forEach { lang ->
+                                        val isSel = currentProject.subtitleLanguage == lang
                                         FilterChip(
-                                            selected = currentProject.subtitleLanguage == lang,
+                                            selected = isSel,
                                             onClick = { viewModel.updateSubtitleLanguage(lang) },
                                             label = { Text(SubtitleLanguage.displayLabel(lang)) },
-                                            colors = FilterChipDefaults.filterChipColors(
-                                                selectedContainerColor = SaffronContainer,
-                                                selectedLabelColor = SaffronGold
-                                            ),
+                                            colors = studioFilterChipColors(),
+                                            border = studioFilterChipBorder(selected = isSel),
                                             modifier = Modifier.testTag("project_sub_lang_$lang")
                                         )
                                     }
@@ -615,14 +607,13 @@ fun DubbingSettingsScreen(
                                 verticalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 DialogueStyle.all.forEach { style ->
+                                    val isSel = currentProject.dialogueStyle == style
                                     FilterChip(
-                                        selected = currentProject.dialogueStyle == style,
+                                        selected = isSel,
                                         onClick = { viewModel.updateDubbingSettings(dialogueStyle = style) },
                                         label = { Text(style) },
-                                        colors = FilterChipDefaults.filterChipColors(
-                                            selectedContainerColor = SaffronContainer,
-                                            selectedLabelColor = SaffronGold
-                                        )
+                                        colors = studioFilterChipColors(),
+                                        border = studioFilterChipBorder(selected = isSel)
                                     )
                                 }
                             }
@@ -659,14 +650,13 @@ fun DubbingSettingsScreen(
                             )
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 listOf("MALE", "FEMALE", "NEUTRAL").forEach { gender ->
+                                    val isSel = currentProject.defaultVoiceGender == gender
                                     FilterChip(
-                                        selected = currentProject.defaultVoiceGender == gender,
+                                        selected = isSel,
                                         onClick = { viewModel.updateDubbingSettings(defaultVoiceGender = gender) },
                                         label = { Text(gender.lowercase().replaceFirstChar { it.uppercase() }) },
-                                        colors = FilterChipDefaults.filterChipColors(
-                                            selectedContainerColor = SaffronContainer,
-                                            selectedLabelColor = SaffronGold
-                                        )
+                                        colors = studioFilterChipColors(),
+                                        border = studioFilterChipBorder(selected = isSel)
                                     )
                                 }
                             }
@@ -704,14 +694,13 @@ fun DubbingSettingsScreen(
                                 verticalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 listOf("natural", "dramatic", "calm", "energetic", "emotional").forEach { emo ->
+                                    val isSel = currentProject.defaultEmotionBias == emo
                                     FilterChip(
-                                        selected = currentProject.defaultEmotionBias == emo,
+                                        selected = isSel,
                                         onClick = { viewModel.updateDubbingSettings(defaultEmotionBias = emo) },
                                         label = { Text(emo.replaceFirstChar { it.uppercase() }) },
-                                        colors = FilterChipDefaults.filterChipColors(
-                                            selectedContainerColor = SaffronContainer,
-                                            selectedLabelColor = SaffronGold
-                                        )
+                                        colors = studioFilterChipColors(),
+                                        border = studioFilterChipBorder(selected = isSel)
                                     )
                                 }
                             }
@@ -801,16 +790,15 @@ fun DubbingSettingsScreen(
                                     "Drama" to "सच चाहे कितना भी कड़वा हो, आज मैं जानकर रहूँगा।",
                                     "Warm" to "चिंता मत करो, जब तक हम साथ हैं सब ठीक रहेगा।"
                                 ).forEach { (chipTitle, sampleLine) ->
+                                    val isSel = auditionText == sampleLine
                                     FilterChip(
-                                        selected = auditionText == sampleLine,
+                                        selected = isSel,
                                         onClick = {
                                             auditionText = if (auditionText == sampleLine) "" else sampleLine
                                         },
                                         label = { Text("Sample: $chipTitle") },
-                                        colors = FilterChipDefaults.filterChipColors(
-                                            selectedContainerColor = SaffronContainer,
-                                            selectedLabelColor = SaffronGold
-                                        )
+                                        colors = studioFilterChipColors(),
+                                        border = studioFilterChipBorder(selected = isSel)
                                     )
                                 }
                             }
@@ -821,14 +809,13 @@ fun DubbingSettingsScreen(
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
                                 listOf("ALL", "MALE", "FEMALE", "NEUTRAL").forEach { filter ->
+                                    val isSel = genderFilter == filter
                                     FilterChip(
-                                        selected = genderFilter == filter,
+                                        selected = isSel,
                                         onClick = { genderFilter = filter },
                                         label = { Text(filter.lowercase().replaceFirstChar { it.uppercase() }) },
-                                        colors = FilterChipDefaults.filterChipColors(
-                                            selectedContainerColor = SaffronContainer,
-                                            selectedLabelColor = SaffronGold
-                                        ),
+                                        colors = studioFilterChipColors(),
+                                        border = studioFilterChipBorder(selected = isSel),
                                         modifier = Modifier.testTag("voice_filter_$filter")
                                     )
                                 }
@@ -1201,14 +1188,13 @@ private fun SpeakerVoiceCard(
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 HindiVoicePresets.all.forEach { preset ->
+                    val isSel = speaker.voicePresetName == preset.id
                     FilterChip(
-                        selected = speaker.voicePresetName == preset.id,
+                        selected = isSel,
                         onClick = { onUpdate(preset.gender, preset.id, speaker.speedMultiplier) },
                         label = { Text(preset.label) },
-                        colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = SaffronContainer,
-                            selectedLabelColor = SaffronGold
-                        )
+                        colors = studioFilterChipColors(),
+                        border = studioFilterChipBorder(selected = isSel)
                     )
                 }
             }

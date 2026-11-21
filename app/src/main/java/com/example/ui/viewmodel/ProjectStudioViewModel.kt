@@ -13,6 +13,7 @@ import com.example.ai.HindiVoicePresets
 import com.example.ai.LocalLlmModelManager
 import com.example.ai.OnDeviceDubbingEngine
 import com.example.ai.OnDeviceModelManager
+import com.example.ai.SlangDictionaryManager
 import com.example.data.local.ChunkEntity
 import com.example.data.local.ChunkStatus
 import com.example.data.local.DialogueSegmentEntity
@@ -714,12 +715,41 @@ class ProjectStudioViewModel(
         newHindiText: String,
         newSpeakerLabel: String,
         newEmotion: String,
-        newSpeed: Float
+        newSpeed: Float,
+        saveToSlangDictionary: Boolean = false,
+        slangSourceTerm: String = "",
+        slangHindiReplacement: String = "",
+        slangWholeWord: Boolean = true
     ) {
         viewModelScope.launch {
-            val textChanged = newHindiText.trim() != segment.hindiText.trim()
+            val cleanHindi = newHindiText.trim()
+            val textChanged = cleanHindi != segment.hindiText.trim()
+            var savedDictTerm: String? = null
+            if (saveToSlangDictionary) {
+                val sourceToSave = slangSourceTerm.trim()
+                    .ifBlank { segment.englishText.trim().trimEnd('.', '!', '?') }
+                val hindiToSave = slangHindiReplacement.trim().ifBlank { cleanHindi }
+                if (sourceToSave.isNotEmpty() && hindiToSave.isNotEmpty()) {
+                    runCatching {
+                        withContext(Dispatchers.IO) {
+                            SlangDictionaryManager.upsertManualOverrideRule(
+                                context = getApplication(),
+                                sourceTerm = sourceToSave,
+                                hindiReplacement = hindiToSave,
+                                wholeWord = slangWholeWord,
+                                note = "Saved from Dialogue Review"
+                            )
+                        }
+                        savedDictTerm = sourceToSave
+                    }.onFailure { err ->
+                        Log.e(TAG, "Failed to save manual override to slang dictionary", err)
+                        _statusBanner.value = "Could not save slang rule: ${err.localizedMessage}"
+                    }
+                }
+            }
+
             val updated = segment.copy(
-                hindiText = newHindiText.trim(),
+                hindiText = cleanHindi,
                 speakerLabel = newSpeakerLabel,
                 emotion = newEmotion,
                 speechSpeed = newSpeed.coerceIn(0.75f, 1.35f),
@@ -729,12 +759,17 @@ class ProjectStudioViewModel(
             )
             repository.updateSegment(updated)
             if (textChanged || newSpeakerLabel != segment.speakerLabel || newSpeed != segment.speechSpeed) {
-                regenerateSegmentTts(updated)
+                regenerateSegmentTts(updated, savedDictionaryTerm = savedDictTerm)
+            } else if (savedDictTerm != null) {
+                _statusBanner.value = "Saved \"$savedDictTerm\" to ${SlangDictionaryManager.DICTIONARY_FILE_NAME} for future movies."
             }
         }
     }
 
-    fun regenerateSegmentTts(segment: DialogueSegmentEntity) {
+    fun regenerateSegmentTts(
+        segment: DialogueSegmentEntity,
+        savedDictionaryTerm: String? = null
+    ) {
         viewModelScope.launch {
             _regeneratingSegmentId.value = segment.id
             try {
@@ -809,7 +844,11 @@ class ProjectStudioViewModel(
                         )
                     )
                 }
-                _statusBanner.value = "Updated Hindi voice for segment."
+                _statusBanner.value = if (savedDictionaryTerm != null) {
+                    "Updated Hindi voice & saved \"$savedDictionaryTerm\" to ${SlangDictionaryManager.DICTIONARY_FILE_NAME}."
+                } else {
+                    "Updated Hindi voice for segment."
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

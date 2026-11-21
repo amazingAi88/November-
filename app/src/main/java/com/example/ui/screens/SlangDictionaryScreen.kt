@@ -40,7 +40,6 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -50,8 +49,6 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -71,16 +68,18 @@ import com.example.ai.SlangDictionaryManager
 import com.example.ai.SlangOverrideRule
 import com.example.data.local.DialogueStyle
 import com.example.ui.components.StatusPill
+import com.example.ui.components.StudioSwitch
 import com.example.ui.components.StudioTopBar
+import com.example.ui.components.studioCheckboxColors
+import com.example.ui.components.studioFilterChipBorder
+import com.example.ui.components.studioFilterChipColors
 import com.example.ui.theme.ElectricCyan
-import com.example.ui.theme.EmeraldContainer
 import com.example.ui.theme.EmeraldSuccess
 import com.example.ui.theme.ErrorCrimson
 import com.example.ui.theme.ObsidianBorder
 import com.example.ui.theme.ObsidianElevated
 import com.example.ui.theme.ObsidianNight
 import com.example.ui.theme.ObsidianSurface
-import com.example.ui.theme.SaffronContainer
 import com.example.ui.theme.SaffronGold
 import com.example.ui.viewmodel.SettingsViewModel
 import java.util.UUID
@@ -256,10 +255,9 @@ fun SlangDictionaryScreen(
                                         )
                                     }
                                 }
-                                Switch(
+                                StudioSwitch(
                                     checked = config.enabled,
                                     onCheckedChange = { viewModel.setSlangDictionaryEnabled(it) },
-                                    colors = SwitchDefaults.colors(checkedThumbColor = SaffronGold),
                                     modifier = Modifier.testTag("slang_master_toggle")
                                 )
                             }
@@ -385,14 +383,13 @@ fun SlangDictionaryScreen(
                         )
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             listOf("ALL" to "All (${config.rules.size})", "CONTEXT" to "Context Rules", "ENABLED" to "Enabled").forEach { (key, label) ->
+                                val isSel = filterTab == key
                                 FilterChip(
-                                    selected = filterTab == key,
+                                    selected = isSel,
                                     onClick = { filterTab = key },
                                     label = { Text(label) },
-                                    colors = FilterChipDefaults.filterChipColors(
-                                        selectedContainerColor = SaffronContainer,
-                                        selectedLabelColor = SaffronGold
-                                    )
+                                    colors = studioFilterChipColors(),
+                                    border = studioFilterChipBorder(selected = isSel)
                                 )
                             }
                         }
@@ -562,10 +559,9 @@ private fun SlangRuleCard(
                         )
                     }
                 }
-                Switch(
+                StudioSwitch(
                     checked = rule.enabled,
                     onCheckedChange = onToggle,
-                    colors = SwitchDefaults.colors(checkedThumbColor = SaffronGold),
                     modifier = Modifier.testTag("toggle_slang_${rule.id}")
                 )
             }
@@ -679,7 +675,8 @@ private fun SlangRuleEditorDialog(
                 ) {
                     Checkbox(
                         checked = wholeWord,
-                        onCheckedChange = { wholeWord = it }
+                        onCheckedChange = { wholeWord = it },
+                        colors = studioCheckboxColors()
                     )
                     Text("Match whole words only", style = MaterialTheme.typography.bodySmall)
                 }
@@ -689,7 +686,8 @@ private fun SlangRuleEditorDialog(
                 ) {
                     Checkbox(
                         checked = rawUncensoredOnly,
-                        onCheckedChange = { rawUncensoredOnly = it }
+                        onCheckedChange = { rawUncensoredOnly = it },
+                        colors = studioCheckboxColors()
                     )
                     Text("Only apply in Raw Uncensored style", style = MaterialTheme.typography.bodySmall)
                 }
