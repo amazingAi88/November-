@@ -31,6 +31,7 @@ import com.example.data.local.ProjectStatus
 import com.example.data.local.SegmentStatus
 import com.example.data.local.SpeakerEntity
 import com.example.data.local.SubtitleLanguage
+import com.example.data.local.TranslationSource
 import com.example.media.AudioChunkExtractor
 import com.example.media.AudioMixer
 import com.example.media.AudioSeparator
@@ -373,7 +374,8 @@ class DubbingWorker(
                             isOverlapping = seg.isOverlapping,
                             audioType = if (isVocalMusic) "VOCAL_SFX" else seg.audioType,
                             speechSpeed = project.defaultSpeechSpeed,
-                            status = if (directHindi) SegmentStatus.TRANSLATED else SegmentStatus.TRANSCRIBED
+                            status = if (directHindi) SegmentStatus.TRANSLATED else SegmentStatus.TRANSCRIBED,
+                            translationSource = if (directHindi) TranslationSource.SUBTITLE else ""
                         )
                     }
                     repository.insertSegments(entities)
@@ -437,7 +439,8 @@ class DubbingWorker(
                                 seg.copy(
                                     hindiText = seg.englishText,
                                     status = SegmentStatus.TRANSLATED,
-                                    errorMessage = null
+                                    errorMessage = null,
+                                    translationSource = TranslationSource.SUBTITLE
                                 )
                             )
                         }
@@ -472,7 +475,8 @@ class DubbingWorker(
                                                 hindiText = trLine.hindiText,
                                                 emotion = trLine.emotion.ifBlank { origSeg.emotion },
                                                 status = SegmentStatus.TRANSLATED,
-                                                errorMessage = null
+                                                errorMessage = null,
+                                                translationSource = trLine.translationSource
                                             )
                                         )
                                         alreadySavedIds.add(origSeg.id)
@@ -517,7 +521,8 @@ class DubbingWorker(
                                         hindiText = tr.hindiText,
                                         emotion = tr.emotion.ifBlank { seg.emotion },
                                         status = SegmentStatus.TRANSLATED,
-                                        errorMessage = null
+                                        errorMessage = null,
+                                        translationSource = tr.translationSource
                                     )
                                 )
                             } else {

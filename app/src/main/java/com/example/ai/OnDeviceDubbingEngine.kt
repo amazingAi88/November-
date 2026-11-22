@@ -11,6 +11,7 @@ import com.example.data.local.DialogueSegmentEntity
 import com.example.data.local.DialogueStyle
 import com.example.data.local.SpeakerEntity
 import com.example.data.local.SttEngineMode
+import com.example.data.local.TranslationSource
 import com.example.media.AudioChunkExtractor
 import com.example.media.WavUtils
 import dev.ffmpegkit.whisper.Whisper
@@ -344,8 +345,9 @@ class OnDeviceDubbingEngine(private val context: Context) {
                 emotion = seg.emotion,
                 dialogueStyle = dialogueStyle
             )
-            val finalHindi = if (prep.directOverrideHindi != null) {
-                prep.directOverrideHindi
+            val isDirectDict = prep.directOverrideHindi != null
+            val finalHindi = if (isDirectDict) {
+                prep.directOverrideHindi!!
             } else {
                 val mlKit = translator ?: getOrCreateTranslator().also { translator = it }
                 val cleanedEnglish = normalizeEnglishForTranslation(prep.protectedEnglish)
@@ -357,7 +359,8 @@ class OnDeviceDubbingEngine(private val context: Context) {
                 TranslatedLine(
                     segmentId = seg.id,
                     hindiText = finalHindi,
-                    emotion = seg.emotion
+                    emotion = seg.emotion,
+                    translationSource = if (isDirectDict) TranslationSource.DICTIONARY else TranslationSource.ML_KIT
                 )
             )
         }
@@ -374,7 +377,7 @@ class OnDeviceDubbingEngine(private val context: Context) {
         speakers: List<SpeakerEntity>,
         dialogueStyle: String,
         modelFile: File,
-        hybridTurbo: Boolean = true,
+        hybridTurbo: Boolean = false,
         onLineTranslated: (suspend (line: TranslatedLine, index: Int, total: Int) -> Unit)? = null
     ): List<TranslatedLine> = withContext(Dispatchers.IO) {
         // Free Vosk & Whisper native buffers before mapping GGUF weights on 4-6GB RAM phones

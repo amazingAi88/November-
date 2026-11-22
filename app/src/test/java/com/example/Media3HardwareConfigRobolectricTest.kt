@@ -10,6 +10,7 @@ import androidx.test.core.app.ApplicationProvider
 import com.example.data.local.DubbingSpeedMode
 import com.example.data.local.MediaAccelMode
 import com.example.data.local.PreferencesRepository
+import com.example.data.local.SttEngineMode
 import com.example.media.Media3HardwareConfig
 import com.example.media.MediaAccelSettings
 import kotlinx.coroutines.flow.first
@@ -34,14 +35,15 @@ class Media3HardwareConfigRobolectricTest {
 
         val initial = repo.preferencesFlow.first()
         assertEquals(300, initial.defaultChunkDurationSec)
-        assertEquals(DubbingSpeedMode.HYBRID_TURBO, initial.dubbingSpeedMode)
+        assertEquals(DubbingSpeedMode.FULL_GGUF, initial.dubbingSpeedMode)
+        assertEquals(SttEngineMode.WHISPER_BASE_EN, initial.sttEngineMode)
         assertEquals(MediaAccelMode.HARDWARE_PRIORITY, initial.mediaAccelMode)
         assertTrue(initial.mediaAsyncCodecQueueing)
         assertTrue(initial.mediaHighOperatingRate)
         assertTrue(initial.mediaAllowCodecFallback)
         assertEquals(30, initial.mediaTransformerTimeoutSec)
 
-        repo.setDubbingSpeedMode(DubbingSpeedMode.FULL_GGUF)
+        repo.setDubbingSpeedMode(DubbingSpeedMode.HYBRID_TURBO)
         repo.setMediaAccelMode(MediaAccelMode.SOFTWARE_SAFE)
         repo.setMediaAsyncCodecQueueing(false)
         repo.setMediaHighOperatingRate(false)
@@ -49,7 +51,7 @@ class Media3HardwareConfigRobolectricTest {
         repo.setMediaTransformerTimeoutSec(0) // Unlimited muxer timeout
 
         val updated = repo.preferencesFlow.first()
-        assertEquals(DubbingSpeedMode.FULL_GGUF, updated.dubbingSpeedMode)
+        assertEquals(DubbingSpeedMode.HYBRID_TURBO, updated.dubbingSpeedMode)
         assertEquals(MediaAccelMode.SOFTWARE_SAFE, updated.mediaAccelMode)
         assertFalse(updated.mediaAsyncCodecQueueing)
         assertFalse(updated.mediaHighOperatingRate)

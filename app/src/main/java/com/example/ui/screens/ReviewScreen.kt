@@ -69,6 +69,7 @@ import com.example.ai.SlangDictionaryManager
 import com.example.data.local.DialogueSegmentEntity
 import com.example.data.local.SegmentStatus
 import com.example.data.local.SpeakerEntity
+import com.example.data.local.TranslationSource
 import com.example.media.WavUtils
 import com.example.ui.components.StatusPill
 import com.example.ui.components.StudioDisclosureCard
@@ -293,6 +294,15 @@ private fun SegmentReviewCard(
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     if (segment.isOverlapping) {
                         StatusPill(label = "OVERLAP", tone = "WARN")
+                    }
+                    val srcLabel = TranslationSource.displayLabel(segment.translationSource)
+                    if (srcLabel.isNotEmpty()) {
+                        val srcTone = when (segment.translationSource) {
+                            TranslationSource.GEMINI, TranslationSource.DICTIONARY -> "SUCCESS"
+                            TranslationSource.ML_KIT -> "WARN"
+                            else -> "ACTIVE"
+                        }
+                        StatusPill(label = srcLabel, tone = srcTone)
                     }
                     StatusPill(label = segment.speakerLabel, tone = "ACTIVE")
                     StatusPill(label = segment.status, tone = statusTone)

@@ -3,6 +3,7 @@ package com.example.ai
 import android.util.Log
 import com.example.data.local.DialogueSegmentEntity
 import com.example.data.local.SpeakerEntity
+import com.example.data.local.TranslationSource
 import com.example.media.AudioChunkExtractor
 import com.example.media.WavUtils
 import com.google.firebase.Firebase
@@ -76,7 +77,8 @@ data class ChunkTranscriptionResult(
 data class TranslatedLine(
     val segmentId: Long,
     val hindiText: String,
-    val emotion: String
+    val emotion: String,
+    val translationSource: String = ""
 )
 
 data class GeminiCloudSampleResult(
@@ -225,17 +227,19 @@ class GeminiDubbingService {
         if (speechSegments.isEmpty()) return@withContext emptyList()
 
         val speakerMap = speakers.associateBy { it.speakerLabel }
-        val inputJson = JSONArray()
+        val resultsById = linkedMapOf<Long, TranslatedLine>()
+        val rollingHindiHistory = mutableListOf<String>()
+        val allIndexById = speechSegments.withIndex().associate { (i, s) -> s.id to i }
+
+        // Separate exact manual/slang dictionary overrides first so saved rules always apply verbatim
+        val segmentsForGemini = mutableListOf<DialogueSegmentEntity>()
         val matchesBySegId = mutableMapOf<Long, List<MatchedSlangRule>>()
+
         speechSegments.forEachIndexed { idx, seg ->
-            val sp = speakerMap[seg.speakerLabel]
             val prevText = speechSegments.getOrNull(idx - 1)?.englishText.orEmpty()
             val nextText = speechSegments.getOrNull(idx + 1)?.englishText.orEmpty()
-            val sceneMood = TranscriptRepairHelper.inferSceneMood(speechSegments, idx)
-            val listenerGender = TranscriptRepairHelper.inferListenerGender(speechSegments, idx, speakerMap)
-            val isGarbled = TranscriptRepairHelper.isLikelyAsrGarble(seg.englishText)
-            val segMatches = if (dictionaryConfig != null) {
-                SlangDictionaryManager.resolveMatches(
+            val prep = if (dictionaryConfig != null) {
+                SlangDictionaryManager.prepareProtectedText(
                     config = dictionaryConfig,
                     englishText = seg.englishText,
                     prevContext = prevText,
@@ -243,67 +247,105 @@ class GeminiDubbingService {
                     emotion = seg.emotion,
                     dialogueStyle = dialogueStyle
                 )
-            } else emptyList()
-            matchesBySegId[seg.id] = segMatches
+            } else null
 
-            inputJson.put(
-                JSONObject().apply {
-                    put("segmentId", seg.id)
-                    put("speaker", seg.speakerLabel)
-                    put("gender", sp?.gender ?: "NEUTRAL")
-                    if (!listenerGender.isNullOrBlank()) put("listenerGender", listenerGender)
-                    put("sceneMood", sceneMood)
-                    if (isGarbled) put("asrMayHaveErrors", true)
-                    put("characterNotes", sp?.traits ?: "")
-                    put("emotion", seg.emotion)
-                    put("targetDurationMs", (seg.endMs - seg.startMs).coerceAtLeast(300L))
-                    put("englishText", seg.englishText)
-                }
-            )
+            if (prep?.directOverrideHindi != null) {
+                val line = TranslatedLine(
+                    segmentId = seg.id,
+                    hindiText = prep.directOverrideHindi,
+                    emotion = seg.emotion,
+                    translationSource = TranslationSource.DICTIONARY
+                )
+                resultsById[seg.id] = line
+            } else {
+                matchesBySegId[seg.id] = prep?.appliedMatches.orEmpty()
+                segmentsForGemini.add(seg)
+            }
         }
 
-        val glossarySection = SlangDictionaryManager.buildPromptGlossaryHints(matchesBySegId.values.flatten())
-        val prompt = """
-            You are an expert Bollywood/cinema Hindi dialogue writer.
-            Translate EVERY English dialogue segment below into Hindi (Devanagari script).
-            Style requested: $dialogueStyle.
-            Strict requirements:
-            - Natural, fluent spoken Hindi/Hindustani (avoid stiff literal textbook translations).
-            - Match speaker gender and listenerGender in Hindi verb & pronoun endings (e.g., कर रहे हो vs कर रही हो).
-            - Use `sceneMood` and surrounding lines to keep scene continuity and repair any phonetically garbled lines (`asrMayHaveErrors: true`) into natural intended movie dialogue.
-            - Keep Hindi line length appropriate so it can be spoken naturally inside targetDurationMs.
-            - Do NOT omit or merge any segmentId. Return one translation object per input segmentId.
-            ${if (glossarySection.isNotBlank()) "\n$glossarySection\n" else ""}
-            Segments JSON:
-            $inputJson
-        """.trimIndent()
+        // Translate remaining lines in scene-aware batches (35 lines per call) with rolling Hindi continuity
+        for (batch in segmentsForGemini.chunked(35)) {
+            val inputJson = JSONArray()
+            val batchMatches = mutableListOf<MatchedSlangRule>()
+            for (seg in batch) {
+                val globalIdx = allIndexById[seg.id] ?: 0
+                val sp = speakerMap[seg.speakerLabel]
+                val sceneMood = TranscriptRepairHelper.inferSceneMood(speechSegments, globalIdx)
+                val listenerGender = TranscriptRepairHelper.inferListenerGender(speechSegments, globalIdx, speakerMap)
+                val isGarbled = TranscriptRepairHelper.isLikelyAsrGarble(seg.englishText)
+                batchMatches.addAll(matchesBySegId[seg.id].orEmpty())
 
-        try {
-            val response = withTimeout(60_000L) {
-                translationModel.generateContent(prompt)
+                inputJson.put(
+                    JSONObject().apply {
+                        put("segmentId", seg.id)
+                        put("speaker", seg.speakerLabel)
+                        put("gender", sp?.gender ?: "NEUTRAL")
+                        if (!listenerGender.isNullOrBlank()) put("listenerGender", listenerGender)
+                        put("sceneMood", sceneMood)
+                        if (isGarbled) put("asrMayHaveErrors", true)
+                        put("characterNotes", sp?.traits ?: "")
+                        put("emotion", seg.emotion)
+                        put("targetDurationMs", (seg.endMs - seg.startMs).coerceAtLeast(300L))
+                        put("englishText", seg.englishText)
+                    }
+                )
             }
-            val jsonStr = response.text ?: throw GeminiApiException("Gemini returned empty translation.")
-            val rawParsed = parseTranslationJson(jsonStr)
-            val segById = speechSegments.associateBy { it.id }
-            rawParsed.map { line ->
-                val segMatches = matchesBySegId[line.segmentId].orEmpty()
-                val origEng = segById[line.segmentId]?.englishText.orEmpty()
-                line.copy(
-                    hindiText = SlangDictionaryManager.postProcessLlmOutput(
+
+            val glossarySection = SlangDictionaryManager.buildPromptGlossaryHints(batchMatches)
+            val rollingSection = if (rollingHindiHistory.isNotEmpty()) {
+                "Previous already-translated Hindi lines for scene tone/gender continuity (do NOT re-translate these):\n" +
+                    rollingHindiHistory.takeLast(3).joinToString("\n") { "- $it" }
+            } else ""
+
+            val prompt = """
+                You are an expert Bollywood/cinema Hindi dialogue writer.
+                Translate EVERY English dialogue segment below into Hindi (Devanagari script).
+                Style requested: $dialogueStyle.
+                Strict requirements:
+                - Natural, fluent spoken Hindi/Hindustani (avoid stiff literal textbook translations).
+                - Match speaker gender and listenerGender in Hindi verb & pronoun endings (e.g., कर रहे हो vs कर रही हो), and keep consistent तुम/आप/तू formality across turns.
+                - Use `sceneMood` and surrounding lines to keep scene continuity and repair any phonetically garbled lines (`asrMayHaveErrors: true`) into natural intended movie dialogue.
+                - Keep Hindi line length appropriate so it can be spoken naturally inside targetDurationMs.
+                - Do NOT omit or merge any segmentId. Return one translation object per input segmentId.
+                ${if (rollingSection.isNotBlank()) "\n$rollingSection\n" else ""}${if (glossarySection.isNotBlank()) "\n$glossarySection\n" else ""}
+                Segments JSON:
+                $inputJson
+            """.trimIndent()
+
+            try {
+                val response = withTimeout(60_000L) {
+                    translationModel.generateContent(prompt)
+                }
+                val jsonStr = response.text ?: throw GeminiApiException("Gemini returned empty translation.")
+                val rawParsed = parseTranslationJson(jsonStr)
+                val segById = batch.associateBy { it.id }
+                rawParsed.forEach { line ->
+                    val segMatches = matchesBySegId[line.segmentId].orEmpty()
+                    val origEng = segById[line.segmentId]?.englishText.orEmpty()
+                    val finalHindi = SlangDictionaryManager.postProcessLlmOutput(
                         llmHindi = line.hindiText,
                         englishText = origEng,
                         matches = segMatches
                     )
-                )
+                    if (finalHindi.isNotBlank()) {
+                        rollingHindiHistory.add(finalHindi.take(80))
+                    }
+                    resultsById[line.segmentId] = line.copy(
+                        hindiText = finalHindi,
+                        translationSource = TranslationSource.GEMINI
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: TimeoutCancellationException) {
+                Log.e(TAG, "Translation timed out", e)
+                throw GeminiApiException("Hindi translation timed out after 60s.", cause = e)
+            } catch (e: Exception) {
+                throw mapException("Hindi translation failed", e)
             }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: TimeoutCancellationException) {
-            Log.e(TAG, "Translation timed out", e)
-            throw GeminiApiException("Hindi translation timed out after 60s.", cause = e)
-        } catch (e: Exception) {
-            throw mapException("Hindi translation failed", e)
         }
+
+        speechSegments.mapNotNull { resultsById[it.id] }
     }
 
     suspend fun testGeminiCloudSample(

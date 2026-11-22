@@ -4,6 +4,7 @@ import android.util.Log
 import com.example.data.local.DialogueSegmentEntity
 import com.example.data.local.DialogueStyle
 import com.example.data.local.SpeakerEntity
+import com.example.data.local.TranslationSource
 import dev.ffmpegkit.llama.Llama
 import dev.ffmpegkit.llama.LlamaConfig
 import dev.ffmpegkit.llama.LlamaModel
@@ -47,7 +48,7 @@ class LocalGgufTranslator {
         speakers: List<SpeakerEntity>,
         dialogueStyle: String,
         dictionaryConfig: SlangDictionaryConfig? = null,
-        hybridTurbo: Boolean = true,
+        hybridTurbo: Boolean = false,
         fallbackTranslator: (suspend (String) -> String)? = null,
         onLineTranslated: (suspend (line: TranslatedLine, index: Int, total: Int) -> Unit)? = null
     ): List<TranslatedLine> = withContext(Dispatchers.IO) {
@@ -60,102 +61,237 @@ class LocalGgufTranslator {
         val results = mutableListOf<TranslatedLine>()
         val recentTranslatedHindi = mutableListOf<String>()
 
+        data class PreparedItem(
+            val index: Int,
+            val seg: DialogueSegmentEntity,
+            val prevText: String,
+            val nextText: String,
+            val sceneMood: String,
+            val listenerGender: String?,
+            val isGarbledAsr: Boolean,
+            val prep: ProtectedTranslationPrep
+        )
+
+        val prepared = speechSegments.mapIndexed { idx, seg ->
+            val prevText = speechSegments.getOrNull(idx - 1)?.englishText.orEmpty()
+            val nextText = speechSegments.getOrNull(idx + 1)?.englishText.orEmpty()
+            val prep = if (dictionaryConfig != null) {
+                SlangDictionaryManager.prepareProtectedText(
+                    config = dictionaryConfig,
+                    englishText = seg.englishText,
+                    prevContext = prevText,
+                    nextContext = nextText,
+                    emotion = seg.emotion,
+                    dialogueStyle = dialogueStyle
+                )
+            } else {
+                ProtectedTranslationPrep(
+                    originalEnglish = seg.englishText,
+                    protectedEnglish = seg.englishText,
+                    directOverrideHindi = null,
+                    appliedMatches = emptyList(),
+                    placeholders = emptyList()
+                )
+            }
+            PreparedItem(
+                index = idx,
+                seg = seg,
+                prevText = prevText,
+                nextText = nextText,
+                sceneMood = TranscriptRepairHelper.inferSceneMood(speechSegments, idx),
+                listenerGender = TranscriptRepairHelper.inferListenerGender(speechSegments, idx, speakerMap),
+                isGarbledAsr = TranscriptRepairHelper.isLikelyAsrGarble(seg.englishText),
+                prep = prep
+            )
+        }
+
         mutex.withLock {
             var handle: LlamaModel? = null
 
-            for ((idx, seg) in speechSegments.withIndex()) {
-                currentCoroutineContext().ensureActive()
+            suspend fun emitLine(item: PreparedItem, hindiText: String, source: String) {
+                val resolvedHindi = hindiText.ifBlank { item.seg.englishText }
+                if (containsDevanagari(resolvedHindi)) {
+                    recentTranslatedHindi.add(resolvedHindi.take(70))
+                }
+                val translated = TranslatedLine(
+                    segmentId = item.seg.id,
+                    hindiText = resolvedHindi,
+                    emotion = item.seg.emotion,
+                    translationSource = source
+                )
+                results.add(translated)
+                onLineTranslated?.invoke(translated, item.index, total)
+            }
 
-                val prevText = speechSegments.getOrNull(idx - 1)?.englishText.orEmpty()
-                val nextText = speechSegments.getOrNull(idx + 1)?.englishText.orEmpty()
-                val sceneMood = TranscriptRepairHelper.inferSceneMood(speechSegments, idx)
-                val listenerGender = TranscriptRepairHelper.inferListenerGender(speechSegments, idx, speakerMap)
-                val isGarbledAsr = TranscriptRepairHelper.isLikelyAsrGarble(seg.englishText)
-                val prevHindiHint = recentTranslatedHindi.lastOrNull()
+            suspend fun flushSceneBlock(block: List<PreparedItem>) {
+                if (block.isEmpty()) return
+                val model = handle ?: ensureLoadedLocked(modelFile).also { handle = it }
 
-                val prep = if (dictionaryConfig != null) {
-                    SlangDictionaryManager.prepareProtectedText(
-                        config = dictionaryConfig,
-                        englishText = seg.englishText,
-                        prevContext = prevText,
-                        nextContext = nextText,
-                        emotion = seg.emotion,
-                        dialogueStyle = dialogueStyle
+                if (block.size == 1) {
+                    val item = block[0]
+                    val (hindi, src) = translateSegmentRobustLocked(
+                        handle = model,
+                        seg = item.seg,
+                        speaker = speakerMap[item.seg.speakerLabel],
+                        listenerGender = item.listenerGender,
+                        sceneMood = item.sceneMood,
+                        prevEnglish = item.prevText.takeIf { it.isNotBlank() },
+                        prevHindi = recentTranslatedHindi.lastOrNull(),
+                        nextEnglish = item.nextText.takeIf { it.isNotBlank() },
+                        asrMayHaveErrors = item.isGarbledAsr,
+                        systemPrompt = systemPrompt,
+                        dialogueStyle = dialogueStyle,
+                        prep = item.prep,
+                        fallbackTranslator = fallbackTranslator
                     )
-                } else {
-                    ProtectedTranslationPrep(
-                        originalEnglish = seg.englishText,
-                        protectedEnglish = seg.englishText,
-                        directOverrideHindi = null,
-                        appliedMatches = emptyList(),
-                        placeholders = emptyList()
-                    )
+                    emitLine(item, hindi, src)
+                    return
                 }
 
-                // Fast-path 1: exact JSON dictionary line override (0 ms)
-                val fastDirect = prep.directOverrideHindi
-                // Fast-path 2: common ultra-short movie fillers/interjections (0 ms)
+                val blockMatches = block.flatMap { it.prep.appliedMatches }
+                val glossaryHints = SlangDictionaryManager.buildPromptGlossaryHints(blockMatches)
+                val blockInputs = block.map { item ->
+                    SceneBlockLineInput(
+                        speakerGender = speakerMap[item.seg.speakerLabel]?.gender,
+                        listenerGender = item.listenerGender,
+                        emotion = item.seg.emotion,
+                        asrMayHaveErrors = item.isGarbledAsr,
+                        englishText = item.seg.englishText
+                    )
+                }
+                val blockPrompt = buildSceneBlockPrompt(
+                    lines = blockInputs,
+                    sceneMood = block.firstOrNull { it.sceneMood != "Casual Cinema Dialogue" }?.sceneMood
+                        ?: block.first().sceneMood,
+                    prevHindiLines = recentTranslatedHindi.takeLast(2),
+                    nextEnglishPreview = block.last().nextText.takeIf { it.isNotBlank() },
+                    glossaryHints = glossaryHints
+                )
+                val totalWords = block.sumOf { it.seg.englishText.trim().split(Regex("\\s+")).size }
+                val blockRaw = runCatching {
+                    Llama.complete(
+                        model,
+                        prompt = blockPrompt,
+                        systemPrompt = systemPrompt,
+                        maxTokens = (totalWords * 4 + 48).coerceIn(64, 320)
+                    ).text
+                }.getOrElse { err ->
+                    Log.w(TAG, "Scene block Llama.complete failed: ${err.message}")
+                    ""
+                }
+                val parsedBySlot = parseSceneBlockResponse(blockRaw, block.size)
+
+                block.forEachIndexed { slotIdx, item ->
+                    currentCoroutineContext().ensureActive()
+                    val candidate = parsedBySlot[slotIdx]
+                    if (candidate != null &&
+                        !isRefusalOrMissingHindi(candidate) &&
+                        !hasRepetitiveLoopOrGarbage(candidate, item.seg.englishText)
+                    ) {
+                        val healed = SlangDictionaryManager.postProcessLlmOutput(
+                            llmHindi = candidate,
+                            englishText = item.seg.englishText,
+                            matches = item.prep.appliedMatches
+                        )
+                        emitLine(item, healed, TranslationSource.LOCAL_GGUF)
+                    } else {
+                        val (hindi, src) = translateSegmentRobustLocked(
+                            handle = model,
+                            seg = item.seg,
+                            speaker = speakerMap[item.seg.speakerLabel],
+                            listenerGender = item.listenerGender,
+                            sceneMood = item.sceneMood,
+                            prevEnglish = item.prevText.takeIf { it.isNotBlank() },
+                            prevHindi = recentTranslatedHindi.lastOrNull(),
+                            nextEnglish = item.nextText.takeIf { it.isNotBlank() },
+                            asrMayHaveErrors = item.isGarbledAsr,
+                            systemPrompt = systemPrompt,
+                            dialogueStyle = dialogueStyle,
+                            prep = item.prep,
+                            fallbackTranslator = fallbackTranslator
+                        )
+                        emitLine(item, hindi, src)
+                    }
+                }
+            }
+
+            val pendingBlock = mutableListOf<PreparedItem>()
+            for (item in prepared) {
+                currentCoroutineContext().ensureActive()
+
+                val fastDirect = item.prep.directOverrideHindi
                 val fastFiller = if (fastDirect == null) {
-                    tryFastShortUtteranceHindi(seg.englishText)
+                    tryFastShortUtteranceHindi(item.seg.englishText)
                 } else null
 
-                // Fast-path 3 (Hybrid Turbo): routine everyday lines go through ML Kit (~10 ms)
-                // while slang/adult/profane/complex/garbled-ASR lines stay on the Local GGUF LLM.
-                val useFastMlKit = fastDirect.isNullOrBlank() &&
-                    fastFiller.isNullOrBlank() &&
-                    hybridTurbo &&
+                if (!fastDirect.isNullOrBlank()) {
+                    flushSceneBlock(pendingBlock.toList())
+                    pendingBlock.clear()
+                    emitLine(item, fastDirect, TranslationSource.DICTIONARY)
+                    continue
+                }
+                if (!fastFiller.isNullOrBlank()) {
+                    flushSceneBlock(pendingBlock.toList())
+                    pendingBlock.clear()
+                    emitLine(item, fastFiller, TranslationSource.DICTIONARY)
+                    continue
+                }
+
+                // Hybrid Fast bypasses LLM for clean non-slang lines ONLY when explicitly selected
+                val useFastMlKit = hybridTurbo &&
                     fallbackTranslator != null &&
-                    !isGarbledAsr &&
+                    !item.isGarbledAsr &&
                     !requiresLocalLlmContext(
-                        englishText = seg.englishText,
-                        prevText = prevText,
-                        nextText = nextText,
-                        hasDictMatch = prep.appliedMatches.isNotEmpty(),
+                        englishText = item.seg.englishText,
+                        prevText = item.prevText,
+                        nextText = item.nextText,
+                        hasDictMatch = item.prep.appliedMatches.isNotEmpty(),
                         dialogueStyle = dialogueStyle
                     )
 
                 val routedMlKitHindi = if (useFastMlKit) {
-                    runCatching { fallbackTranslator!!.invoke(prep.protectedEnglish) }
+                    runCatching { fallbackTranslator!!.invoke(item.prep.protectedEnglish) }
                         .getOrNull()
-                        ?.let { raw -> SlangDictionaryManager.restoreAndOverride(raw, prep) }
+                        ?.let { raw -> SlangDictionaryManager.restoreAndOverride(raw, item.prep) }
                         ?.takeIf { containsDevanagari(it) }
                 } else null
 
-                val finalHindi = when {
-                    !fastDirect.isNullOrBlank() -> fastDirect
-                    !fastFiller.isNullOrBlank() -> fastFiller
-                    !routedMlKitHindi.isNullOrBlank() -> routedMlKitHindi
-                    else -> {
-                        val model = handle ?: ensureLoadedLocked(modelFile).also { handle = it }
-                        translateSegmentRobustLocked(
-                            handle = model,
-                            seg = seg,
-                            speaker = speakerMap[seg.speakerLabel],
-                            listenerGender = listenerGender,
-                            sceneMood = sceneMood,
-                            prevEnglish = prevText.takeIf { it.isNotBlank() },
-                            prevHindi = prevHindiHint,
-                            nextEnglish = nextText.takeIf { it.isNotBlank() },
-                            asrMayHaveErrors = isGarbledAsr,
-                            systemPrompt = systemPrompt,
-                            dialogueStyle = dialogueStyle,
-                            prep = prep,
-                            fallbackTranslator = fallbackTranslator
-                        )
-                    }
+                if (!routedMlKitHindi.isNullOrBlank()) {
+                    flushSceneBlock(pendingBlock.toList())
+                    pendingBlock.clear()
+                    emitLine(item, routedMlKitHindi, TranslationSource.ML_KIT)
+                    continue
                 }
 
-                val resolvedHindi = finalHindi.ifBlank { seg.englishText }
-                if (containsDevanagari(resolvedHindi)) {
-                    recentTranslatedHindi.add(resolvedHindi.take(60))
+                if (hybridTurbo) {
+                    val model = handle ?: ensureLoadedLocked(modelFile).also { handle = it }
+                    val (hindi, src) = translateSegmentRobustLocked(
+                        handle = model,
+                        seg = item.seg,
+                        speaker = speakerMap[item.seg.speakerLabel],
+                        listenerGender = item.listenerGender,
+                        sceneMood = item.sceneMood,
+                        prevEnglish = item.prevText.takeIf { it.isNotBlank() },
+                        prevHindi = recentTranslatedHindi.lastOrNull(),
+                        nextEnglish = item.nextText.takeIf { it.isNotBlank() },
+                        asrMayHaveErrors = item.isGarbledAsr,
+                        systemPrompt = systemPrompt,
+                        dialogueStyle = dialogueStyle,
+                        prep = item.prep,
+                        fallbackTranslator = fallbackTranslator
+                    )
+                    emitLine(item, hindi, src)
+                } else {
+                    pendingBlock.add(item)
+                    if (pendingBlock.size >= 4) {
+                        flushSceneBlock(pendingBlock.toList())
+                        pendingBlock.clear()
+                    }
                 }
-                val translated = TranslatedLine(
-                    segmentId = seg.id,
-                    hindiText = resolvedHindi,
-                    emotion = seg.emotion
-                )
-                results.add(translated)
-                onLineTranslated?.invoke(translated, idx, total)
+            }
+            if (pendingBlock.isNotEmpty()) {
+                flushSceneBlock(pendingBlock.toList())
+                pendingBlock.clear()
             }
         }
         results
@@ -302,7 +438,7 @@ class LocalGgufTranslator {
         dialogueStyle: String,
         prep: ProtectedTranslationPrep,
         fallbackTranslator: (suspend (String) -> String)?
-    ): String {
+    ): Pair<String, String> {
         val glossaryHints = SlangDictionaryManager.buildPromptGlossaryHints(prep.appliedMatches)
         val prompt = buildSingleLinePrompt(
             englishLine = seg.englishText,
@@ -318,7 +454,8 @@ class LocalGgufTranslator {
             dialogueStyle = dialogueStyle
         )
         val wordCount = seg.englishText.trim().split(Regex("\\s+")).size
-        val maxTok = (wordCount * 2 + 24).coerceIn(32, 84)
+        // Devanagari tokens require ~3-5 tokens per Hindi word; ensure lines never truncate mid-sentence
+        val maxTok = (wordCount * 4 + 40).coerceIn(48, 140)
 
         val primaryRaw = runCatching {
             Llama.complete(
@@ -333,12 +470,19 @@ class LocalGgufTranslator {
         }
 
         var candidate = extractBestHindiLine(primaryRaw)
+        var usedMlKitFallback = false
 
-        // If GGUF refused, produced non-Devanagari text, or looped/echoed prompt junk, retry cleanly
+        // If GGUF refused, produced non-Devanagari text, or looped/echoed prompt junk, retry WITH context preserved
         if (isRefusalOrMissingHindi(candidate) || hasRepetitiveLoopOrGarbage(candidate, seg.englishText)) {
-            Log.d(TAG, "Retrying segment ${seg.id} with protected clean prompt (raw was: ${primaryRaw.take(60)})")
+            Log.d(TAG, "Retrying segment ${seg.id} with protected context prompt (raw was: ${primaryRaw.take(60)})")
             val protectedRaw = runCatching {
-                retryWithProtectedPromptLocked(handle, prep.protectedEnglish)
+                retryWithProtectedPromptLocked(
+                    handle = handle,
+                    protectedEnglish = prep.protectedEnglish,
+                    speakerGender = speaker?.gender,
+                    listenerGender = listenerGender,
+                    sceneMood = sceneMood
+                )
             }.getOrDefault("")
             val protectedClean = extractBestHindiLine(protectedRaw)
             if (!isRefusalOrMissingHindi(protectedClean) && !hasRepetitiveLoopOrGarbage(protectedClean, seg.englishText)) {
@@ -348,7 +492,7 @@ class LocalGgufTranslator {
             }
         }
 
-        // Final safety net: use protected ML Kit fallback if GGUF still failed, refused, or looped
+        // Final safety net: use protected ML Kit fallback ONLY if GGUF failed twice, and report ML_KIT honestly
         if ((isRefusalOrMissingHindi(candidate) || hasRepetitiveLoopOrGarbage(candidate, seg.englishText)) &&
             fallbackTranslator != null
         ) {
@@ -357,6 +501,7 @@ class LocalGgufTranslator {
                 val restored = SlangDictionaryManager.restoreAndOverride(mlKitHindi, prep)
                 if (containsDevanagari(restored) && !hasRepetitiveLoopOrGarbage(restored, seg.englishText)) {
                     candidate = restored
+                    usedMlKitFallback = true
                 }
             }
         }
@@ -366,19 +511,31 @@ class LocalGgufTranslator {
             englishText = seg.englishText,
             matches = prep.appliedMatches
         )
-        return postProcessed.ifBlank { seg.englishText }
+        val source = if (usedMlKitFallback) TranslationSource.ML_KIT else TranslationSource.LOCAL_GGUF
+        return postProcessed.ifBlank { seg.englishText } to source
     }
 
     private suspend fun retryWithProtectedPromptLocked(
         handle: LlamaModel,
-        protectedEnglish: String
+        protectedEnglish: String,
+        speakerGender: String? = null,
+        listenerGender: String? = null,
+        sceneMood: String? = null
     ): String {
         val wordCount = protectedEnglish.trim().split(Regex("\\s+")).size
+        val ctxPrefix = buildString {
+            if (!sceneMood.isNullOrBlank()) appendLine("Scene Mood: $sceneMood")
+            val sp = speakerGender?.takeIf { it.isNotBlank() && it != "NEUTRAL" }
+            val ls = listenerGender?.takeIf { it.isNotBlank() && it != "NEUTRAL" }
+            if (sp != null || ls != null) {
+                appendLine("Speaker: ${sp ?: "UNKNOWN"}${if (ls != null) " talking to $ls" else ""}")
+            }
+        }
         val res = Llama.complete(
             handle,
-            prompt = "English: \"$protectedEnglish\"\nHindi:",
-            systemPrompt = "Translate English text into spoken Hindi in Devanagari script only. Preserve ZXQ tokens exactly. Never repeat phrases.",
-            maxTokens = (wordCount * 3 + 24).coerceIn(36, 90)
+            prompt = "${ctxPrefix}English: \"$protectedEnglish\"\nHindi:",
+            systemPrompt = "Translate English dialogue into natural spoken Hindi in Devanagari script matching speaker/listener gender. Preserve ZXQ tokens exactly. Never repeat phrases.",
+            maxTokens = (wordCount * 4 + 40).coerceIn(48, 140)
         )
         return res.text
     }
@@ -435,6 +592,64 @@ class LocalGgufTranslator {
             appendLine("Note: Audio transcript may have phonetic typos; infer intended movie dialogue from Scene Mood & context.")
         }
         append("Translate ONLY this English line into Hindi (Devanagari only):\nEnglish: \"$englishLine\"\nHindi:")
+    }
+
+    data class SceneBlockLineInput(
+        val speakerGender: String?,
+        val listenerGender: String?,
+        val emotion: String?,
+        val asrMayHaveErrors: Boolean,
+        val englishText: String
+    )
+
+    internal fun buildSceneBlockPrompt(
+        lines: List<SceneBlockLineInput>,
+        sceneMood: String,
+        prevHindiLines: List<String> = emptyList(),
+        nextEnglishPreview: String? = null,
+        glossaryHints: String = ""
+    ): String = buildString {
+        if (glossaryHints.isNotBlank()) {
+            appendLine(glossaryHints)
+        }
+        appendLine("Scene Mood: $sceneMood")
+        if (prevHindiLines.isNotEmpty()) {
+            appendLine("Previous Hindi context (do NOT re-translate):")
+            prevHindiLines.forEach { appendLine("- $it") }
+        }
+        appendLine("Translate ALL ${lines.size} numbered scene lines below into natural spoken Hindi (Devanagari only) keeping consistent speaker/listener gender and pronoun tone (तुम/आप/तू).")
+        lines.forEachIndexed { idx, line ->
+            val sp = line.speakerGender?.takeIf { it.isNotBlank() && it != "NEUTRAL" } ?: "UNKNOWN"
+            val ls = line.listenerGender?.takeIf { it.isNotBlank() && it != "NEUTRAL" }
+            val lsPart = if (ls != null) " -> $ls" else ""
+            val emoPart = if (!line.emotion.isNullOrBlank() && line.emotion != "neutral") ", ${line.emotion}" else ""
+            val asrTag = if (line.asrMayHaveErrors) " [ASR-garbled: infer from scene]" else ""
+            appendLine("[${idx + 1} | $sp$lsPart$emoPart$asrTag]: \"${line.englishText}\"")
+        }
+        if (!nextEnglishPreview.isNullOrBlank()) {
+            appendLine("Following context: \"${nextEnglishPreview.take(55)}\"")
+        }
+        append("Return exact numbered lines [1]..[${lines.size}] in Hindi:\n[1]")
+    }
+
+    internal fun parseSceneBlockResponse(raw: String, expectedCount: Int): Map<Int, String> {
+        if (raw.isBlank() || expectedCount <= 0) return emptyMap()
+        val withoutThink = THINK_BLOCK_REGEX.replace(raw, " ").trim()
+        // If prompt ended with "[1]", the model may start directly with line 1 text before "[2]"
+        val normalized = if (!withoutThink.startsWith("[1]")) "[1] $withoutThink" else withoutThink
+        val slotPattern = Regex("""\[(\d+)\]\s*(.*?)(?=\[\d+\]|$)""", setOf(RegexOption.DOT_MATCHES_ALL))
+        val out = mutableMapOf<Int, String>()
+        slotPattern.findAll(normalized).forEach { m ->
+            val num = m.groupValues[1].toIntOrNull() ?: return@forEach
+            val zeroIdx = num - 1
+            if (zeroIdx in 0 until expectedCount && !out.containsKey(zeroIdx)) {
+                val cleaned = extractBestHindiLine(m.groupValues[2])
+                if (cleaned.isNotBlank()) {
+                    out[zeroIdx] = cleaned
+                }
+            }
+        }
+        return out
     }
 
     companion object {

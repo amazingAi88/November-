@@ -787,12 +787,12 @@ fun SettingsScreen(
                                 text = if (prefs.dubbingSpeedMode == DubbingSpeedMode.HYBRID_TURBO) {
                                     val mlReady = modelsStatus?.mlKitHindiDownloaded == true
                                     if (mlReady) {
-                                        "Hybrid Turbo is active & ready: routine dialogue runs at ~10 ms on ML Kit while slang, profanity, intimacy & long lines run on your Local GGUF LLM."
+                                        "Hybrid Fast is active: clean lines bypass Qwen to literal ML Kit (no scene context), while slang/adult lines use Local GGUF. Choose Full GGUF for scene context on every line."
                                     } else {
-                                        "Hybrid Turbo selected — download the ~30 MB ML Kit EN→HI model below to unlock 3-5x faster routine translation alongside Local GGUF."
+                                        "Hybrid Fast selected — download the ~30 MB ML Kit EN→HI model below, or switch to Full GGUF Scene-Context (recommended)."
                                     }
                                 } else {
-                                    "Full GGUF Mode: sends every single line through your Local GGUF LLM for maximum nuance (takes longer on phone CPU)."
+                                    "Full GGUF Scene-Context (Recommended): translates every scene in 4-line blocks through your Local GGUF LLM with speaker/listener gender & mood continuity."
                                 },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant

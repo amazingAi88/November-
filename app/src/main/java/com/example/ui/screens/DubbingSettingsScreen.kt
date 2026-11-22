@@ -241,7 +241,7 @@ fun DubbingSettingsScreen(
                                 FilterChip(
                                     selected = geminiSelected,
                                     onClick = { viewModel.updateDubbingSettings(engineMode = EngineMode.GEMINI_CLOUD) },
-                                    label = { Text("Gemini Cloud AI (Optional)") },
+                                    label = { Text("Gemini Cloud AI (Best Scene Context)") },
                                     colors = studioFilterChipColors(),
                                     border = studioFilterChipBorder(selected = geminiSelected),
                                     modifier = Modifier.testTag("engine_gemini_chip")
@@ -251,11 +251,11 @@ fun DubbingSettingsScreen(
                             Text(
                                 text = when (currentProject.engineMode) {
                                     EngineMode.ON_DEVICE_FREE ->
-                                        "Runs completely inside your phone using Vosk Offline STT (~40 MB), Google ML Kit EN→HI (~30 MB), DSP pitch speaker detection & Android Hindi TTS. No paid API keys or 429 limits."
+                                        "Offline literal mode: translates ONE isolated sentence at a time via Google ML Kit (~30 MB). Fast & free, but has NO scene context or speaker-gender continuity."
                                     EngineMode.ON_DEVICE_LLM ->
-                                        "Uses Vosk Offline STT + a local Open-Source GGUF LLM (Qwen 2.5 / Gemma GGUF) inside your phone + Android Hindi TTS. Understands movie/adult slang & context with 0% censorship and zero internet limits."
+                                        "Offline Scene-Block LLM: translates 4 lines together on Qwen GGUF with speaker/listener gender & mood continuity. For best accuracy, use Whisper Base EN or attach an .SRT file."
                                     else ->
-                                        "Uses Firebase AI Logic Gemini cloud for cinematic dialogue & neural voices. Free-tier per-minute/daily quota limits apply."
+                                        "Best Scene Context: Gemini listens to actual dialogue tone/emotion and translates entire 35-line scenes together with Bollywood flow & character gender continuity (internet & quota apply)."
                                 },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -339,9 +339,9 @@ fun DubbingSettingsScreen(
                                         }
                                         Text(
                                             text = if (dubbingSpeedMode == DubbingSpeedMode.HYBRID_TURBO) {
-                                                "Hybrid Turbo translates clean lines in ~10 ms via ML Kit and routes slang, bold/adult & complex lines to Local GGUF."
+                                                "Hybrid Fast: clean dialogue is routed to literal ML Kit (no scene context) while slang/adult lines use Local GGUF. Switch to Full GGUF for scene context on every line."
                                             } else {
-                                                "Full GGUF processes every dialogue line on the local LLM."
+                                                "Full GGUF Scene-Context (Recommended): translates 4-line scene blocks together on Qwen with speaker/listener gender & mood continuity (honestly marks any rare ML Kit fallback in Review)."
                                             },
                                             style = MaterialTheme.typography.bodySmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant

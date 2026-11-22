@@ -7,8 +7,10 @@ import androidx.sqlite.db.SupportSQLiteOpenHelper
 import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.local.AppDatabase
+import com.example.data.local.DialogueSegmentEntity
 import com.example.data.local.MovieProjectEntity
 import com.example.data.local.SubtitleLanguage
+import com.example.data.local.TranslationSource
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -156,6 +158,110 @@ class DatabaseMigrationRobolectricTest {
         )
         assertNull(roomDb.projectDao().getProject(id)?.subtitlePath)
         assertEquals(SubtitleLanguage.ENGLISH, roomDb.projectDao().getProject(id)?.subtitleLanguage)
+        roomDb.close()
+        File(dbFile.absolutePath).delete()
+    }
+
+    @Test
+    fun `MIGRATION_5_6 adds translationSource column and v6 Room persists engine badge`() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val dbName = "migration_5_6_${System.currentTimeMillis()}.db"
+        val dbFile = context.getDatabasePath(dbName)
+        dbFile.parentFile?.mkdirs()
+
+        val helper = FrameworkSQLiteOpenHelperFactory().create(
+            SupportSQLiteOpenHelper.Configuration.builder(context)
+                .name(dbName)
+                .callback(object : SupportSQLiteOpenHelper.Callback(5) {
+                    override fun onCreate(db: SupportSQLiteDatabase) {
+                        db.execSQL(
+                            """
+                            CREATE TABLE IF NOT EXISTS `dialogue_segments` (
+                                `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                                `projectId` INTEGER NOT NULL,
+                                `chunkIndex` INTEGER NOT NULL,
+                                `orderIndex` INTEGER NOT NULL,
+                                `startMs` INTEGER NOT NULL,
+                                `endMs` INTEGER NOT NULL,
+                                `speakerLabel` TEXT NOT NULL,
+                                `englishText` TEXT NOT NULL,
+                                `hindiText` TEXT NOT NULL,
+                                `emotion` TEXT NOT NULL,
+                                `isOverlapping` INTEGER NOT NULL,
+                                `audioType` TEXT NOT NULL,
+                                `speechSpeed` REAL NOT NULL,
+                                `ttsAudioPath` TEXT,
+                                `ttsDurationMs` INTEGER NOT NULL,
+                                `status` TEXT NOT NULL,
+                                `errorMessage` TEXT
+                            )
+                            """.trimIndent()
+                        )
+                    }
+
+                    override fun onUpgrade(db: SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+                })
+                .build()
+        )
+
+        helper.writableDatabase.use { rawDb ->
+            rawDb.execSQL(
+                """
+                INSERT INTO dialogue_segments (
+                    id, projectId, chunkIndex, orderIndex, startMs, endMs, speakerLabel,
+                    englishText, hindiText, emotion, isOverlapping, audioType,
+                    speechSpeed, ttsAudioPath, ttsDurationMs, status, errorMessage
+                ) VALUES (
+                    1, 10, 0, 0, 0, 1500, 'SPEAKER_1',
+                    'Hello', 'नमस्ते', 'neutral', 0, 'SPEECH',
+                    1.0, NULL, 0, 'TRANSLATED', NULL
+                )
+                """.trimIndent()
+            )
+            AppDatabase.MIGRATION_5_6.migrate(rawDb)
+            rawDb.query("SELECT translationSource FROM dialogue_segments WHERE id = 1").use { c ->
+                assertEquals(true, c.moveToFirst())
+                assertEquals("", c.getString(0))
+            }
+        }
+        helper.close()
+
+        val roomDb = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        val pid = roomDb.projectDao().insertProject(
+            MovieProjectEntity(
+                title = "Source Test",
+                sourceUriString = "content://v/3",
+                fileName = "v3.mp4",
+                durationMs = 30_000L,
+                width = 1280,
+                height = 720,
+                fileSizeBytes = 500_000L,
+                videoMime = "video/avc",
+                audioMime = "audio/mp4a-latm",
+                audioChannels = 2,
+                audioSampleRate = 48000,
+                thumbnailPath = null
+            )
+        )
+        roomDb.segmentDao().insertSegments(
+            listOf(
+                DialogueSegmentEntity(
+                    projectId = pid,
+                    chunkIndex = 0,
+                    orderIndex = 0,
+                    startMs = 0L,
+                    endMs = 1500L,
+                    speakerLabel = "SPEAKER_1",
+                    englishText = "Watch out!",
+                    hindiText = "संभल के!",
+                    translationSource = TranslationSource.LOCAL_GGUF
+                )
+            )
+        )
+        val saved = roomDb.segmentDao().getSegments(pid).first()
+        assertEquals(TranslationSource.LOCAL_GGUF, saved.translationSource)
         roomDb.close()
         File(dbFile.absolutePath).delete()
     }

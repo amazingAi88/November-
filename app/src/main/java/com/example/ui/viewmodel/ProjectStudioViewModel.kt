@@ -28,6 +28,7 @@ import com.example.data.local.SegmentStatus
 import com.example.data.local.SpeakerEntity
 import com.example.data.local.SttEngineMode
 import com.example.data.local.SubtitleLanguage
+import com.example.data.local.TranslationSource
 import com.example.media.AudioChunkExtractor
 import com.example.media.AudioMixer
 import com.example.media.AudioPlaybackState
@@ -101,11 +102,11 @@ class ProjectStudioViewModel(
 
     val dubbingSpeedMode: StateFlow<String> = preferencesRepository.preferencesFlow
         .map { it.dubbingSpeedMode }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), DubbingSpeedMode.HYBRID_TURBO)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), DubbingSpeedMode.FULL_GGUF)
 
     val sttEngineMode: StateFlow<String> = preferencesRepository.preferencesFlow
         .map { it.sttEngineMode }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), SttEngineMode.VOSK_FAST)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), SttEngineMode.WHISPER_BASE_EN)
 
     val sttVocalIsolationEnabled: StateFlow<Boolean> = preferencesRepository.preferencesFlow
         .map { it.sttVocalIsolationEnabled }
@@ -755,7 +756,12 @@ class ProjectStudioViewModel(
                 speechSpeed = newSpeed.coerceIn(0.75f, 1.35f),
                 status = if (textChanged && segment.status == SegmentStatus.TTS_DONE) {
                     SegmentStatus.TRANSLATED
-                } else segment.status
+                } else segment.status,
+                translationSource = when {
+                    savedDictTerm != null -> TranslationSource.DICTIONARY
+                    textChanged -> TranslationSource.MANUAL
+                    else -> segment.translationSource
+                }
             )
             repository.updateSegment(updated)
             if (textChanged || newSpeakerLabel != segment.speakerLabel || newSpeed != segment.speechSpeed) {

@@ -44,6 +44,25 @@ object SegmentStatus {
     const val FAILED = "FAILED"
 }
 
+object TranslationSource {
+    const val GEMINI = "GEMINI"
+    const val LOCAL_GGUF = "LOCAL_GGUF"
+    const val ML_KIT = "ML_KIT"
+    const val DICTIONARY = "DICTIONARY"
+    const val SUBTITLE = "SUBTITLE"
+    const val MANUAL = "MANUAL"
+
+    fun displayLabel(source: String): String = when (source) {
+        GEMINI -> "GEMINI"
+        LOCAL_GGUF -> "QWEN GGUF"
+        ML_KIT -> "ML KIT"
+        DICTIONARY -> "DICT"
+        SUBTITLE -> "SRT"
+        MANUAL -> "MANUAL"
+        else -> ""
+    }
+}
+
 object DialogueStyle {
     const val CONVERSATIONAL = "Natural Conversational Hindi"
     const val CINEMATIC = "Cinematic Dramatic Hindi"
@@ -226,5 +245,6 @@ data class DialogueSegmentEntity(
     val ttsAudioPath: String? = null,
     val ttsDurationMs: Long = 0L,
     val status: String = SegmentStatus.TRANSCRIBED,
-    val errorMessage: String? = null
+    val errorMessage: String? = null,
+    val translationSource: String = ""
 )

@@ -28,15 +28,15 @@ object MediaAccelMode {
 }
 
 object DubbingSpeedMode {
-    const val HYBRID_TURBO = "HYBRID_TURBO"
     const val FULL_GGUF = "FULL_GGUF"
+    const val HYBRID_TURBO = "HYBRID_TURBO"
 
-    val all = listOf(HYBRID_TURBO, FULL_GGUF)
+    val all = listOf(FULL_GGUF, HYBRID_TURBO)
 
     fun displayLabel(mode: String): String = when (mode) {
-        HYBRID_TURBO -> "Hybrid Turbo (3-5x Faster)"
-        FULL_GGUF -> "Full GGUF (Every Line)"
-        else -> "Hybrid Turbo (3-5x Faster)"
+        FULL_GGUF -> "Full GGUF Scene-Context (Every Line)"
+        HYBRID_TURBO -> "Hybrid Fast (ML Kit + Slang LLM)"
+        else -> "Full GGUF Scene-Context (Every Line)"
     }
 }
 
@@ -49,13 +49,13 @@ data class StudioPreferences(
     val defaultExportQuality: String = ExportQuality.ORIGINAL,
     val autoCleanupAfterExport: Boolean = false,
     val activeGgufModelFileName: String = "",
-    val dubbingSpeedMode: String = DubbingSpeedMode.HYBRID_TURBO,
+    val dubbingSpeedMode: String = DubbingSpeedMode.FULL_GGUF,
     val mediaAccelMode: String = MediaAccelMode.HARDWARE_PRIORITY,
     val mediaAsyncCodecQueueing: Boolean = true,
     val mediaHighOperatingRate: Boolean = true,
     val mediaAllowCodecFallback: Boolean = true,
     val mediaTransformerTimeoutSec: Int = 30,
-    val sttEngineMode: String = SttEngineMode.VOSK_FAST,
+    val sttEngineMode: String = SttEngineMode.WHISPER_BASE_EN,
     val sttVocalIsolationEnabled: Boolean = true
 )
 
@@ -89,13 +89,13 @@ class PreferencesRepository(private val context: Context) {
             defaultExportQuality = prefs[Keys.EXPORT_QUALITY] ?: ExportQuality.ORIGINAL,
             autoCleanupAfterExport = prefs[Keys.AUTO_CLEANUP] ?: false,
             activeGgufModelFileName = prefs[Keys.ACTIVE_GGUF_MODEL] ?: "",
-            dubbingSpeedMode = prefs[Keys.DUBBING_SPEED_MODE] ?: DubbingSpeedMode.HYBRID_TURBO,
+            dubbingSpeedMode = prefs[Keys.DUBBING_SPEED_MODE] ?: DubbingSpeedMode.FULL_GGUF,
             mediaAccelMode = prefs[Keys.MEDIA_ACCEL_MODE] ?: MediaAccelMode.HARDWARE_PRIORITY,
             mediaAsyncCodecQueueing = prefs[Keys.MEDIA_ASYNC_CODEC_QUEUEING] ?: true,
             mediaHighOperatingRate = prefs[Keys.MEDIA_HIGH_OPERATING_RATE] ?: true,
             mediaAllowCodecFallback = prefs[Keys.MEDIA_ALLOW_CODEC_FALLBACK] ?: true,
             mediaTransformerTimeoutSec = prefs[Keys.MEDIA_TRANSFORMER_TIMEOUT_SEC] ?: 30,
-            sttEngineMode = prefs[Keys.STT_ENGINE_MODE] ?: SttEngineMode.VOSK_FAST,
+            sttEngineMode = prefs[Keys.STT_ENGINE_MODE] ?: SttEngineMode.WHISPER_BASE_EN,
             sttVocalIsolationEnabled = prefs[Keys.STT_VOCAL_ISOLATION] ?: true
         )
     }
@@ -133,7 +133,7 @@ class PreferencesRepository(private val context: Context) {
     }
 
     suspend fun setDubbingSpeedMode(mode: String) {
-        val valid = if (mode in DubbingSpeedMode.all) mode else DubbingSpeedMode.HYBRID_TURBO
+        val valid = if (mode in DubbingSpeedMode.all) mode else DubbingSpeedMode.FULL_GGUF
         context.dataStore.edit { it[Keys.DUBBING_SPEED_MODE] = valid }
     }
 
@@ -163,7 +163,7 @@ class PreferencesRepository(private val context: Context) {
     }
 
     suspend fun setSttEngineMode(mode: String) {
-        val valid = if (mode in SttEngineMode.all) mode else SttEngineMode.VOSK_FAST
+        val valid = if (mode in SttEngineMode.all) mode else SttEngineMode.WHISPER_BASE_EN
         context.dataStore.edit { it[Keys.STT_ENGINE_MODE] = valid }
     }
 

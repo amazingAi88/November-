@@ -249,6 +249,45 @@ class SceneContextAndResumeTest {
     }
 
     @Test
+    fun `LocalGgufTranslator builds multi-line scene block prompt and parses numbered Hindi replies`() {
+        val translator = LocalGgufTranslator()
+        val prompt = translator.buildSceneBlockPrompt(
+            lines = listOf(
+                LocalGgufTranslator.SceneBlockLineInput(
+                    speakerGender = "MALE",
+                    listenerGender = "FEMALE",
+                    emotion = "whisper",
+                    asrMayHaveErrors = false,
+                    englishText = "Come closer to me."
+                ),
+                LocalGgufTranslator.SceneBlockLineInput(
+                    speakerGender = "FEMALE",
+                    listenerGender = "MALE",
+                    emotion = "calm",
+                    asrMayHaveErrors = true,
+                    englishText = "warming wait here"
+                )
+            ),
+            sceneMood = "Intimate / Romantic",
+            prevHindiLines = listOf("इतनी रात को यहाँ क्या कर रहे हो?"),
+            nextEnglishPreview = "Everything is going to be fine."
+        )
+
+        assertTrue(prompt.contains("Scene Mood: Intimate / Romantic"))
+        assertTrue(prompt.contains("इतनी रात को यहाँ क्या कर रहे हो?"))
+        assertTrue(prompt.contains("[1 | MALE -> FEMALE, whisper]: \"Come closer to me.\""))
+        assertTrue(prompt.contains("[2 | FEMALE -> MALE, calm [ASR-garbled: infer from scene]]: \"warming wait here\""))
+        assertTrue(prompt.contains("Following context: \"Everything is going to be fine.\""))
+
+        val parsed = translator.parseSceneBlockResponse(
+            raw = "मेरे करीब आओ।\n[2] एक मिनट यहीं रुको।",
+            expectedCount = 2
+        )
+        assertEquals("मेरे करीब आओ।", parsed[0])
+        assertEquals("एक मिनट यहीं रुको।", parsed[1])
+    }
+
+    @Test
     fun `AudioMixer prevents non-overlapping TTS clip from bleeding into next speaker slot`() = runTest {
         val sampleRate = 44100
         val channels = 2
