@@ -8,6 +8,7 @@ import com.example.data.local.EngineMode
 import com.example.data.local.PreferencesRepository
 import com.example.security.configureAppCheck
 import com.google.firebase.FirebaseApp
+import com.google.firebase.FirebaseOptions
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -122,6 +123,23 @@ class GeminiCloudModeTest {
     @Test
     fun `configureAppCheck persists debug token synchronously when launch intent provides extra`() {
         val context = ApplicationProvider.getApplicationContext<Context>()
+        val hasGoogleAppId = context.resources.getIdentifier(
+            "google_app_id",
+            "string",
+            context.packageName
+        ) != 0
+        if (!hasGoogleAppId && FirebaseApp.getApps(context).isEmpty()) {
+            // CI checkouts without google-services.json rely on googleServices.missing.passthrough=true;
+            // seed a test-only FirebaseApp so configureAppCheck debug persistence can be verified in CI.
+            FirebaseApp.initializeApp(
+                context,
+                FirebaseOptions.Builder()
+                    .setApplicationId("1:000000000000:android:0000000000000000000000")
+                    .setApiKey("robolectric-unit-test-placeholder")
+                    .setProjectId("robolectric-unit-test-project")
+                    .build()
+            )
+        }
         val launchIntent = Intent().putExtra("FIREBASE_APPCHECK_DEBUG_TOKEN", "test-debug-token-12345")
 
         configureAppCheck(context, launchIntent)

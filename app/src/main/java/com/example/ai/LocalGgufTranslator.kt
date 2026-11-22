@@ -250,7 +250,7 @@ class LocalGgufTranslator {
                     )
 
                 val routedMlKitHindi = if (useFastMlKit) {
-                    runCatching { fallbackTranslator!!.invoke(item.prep.protectedEnglish) }
+                    runCatching { fallbackTranslator.invoke(item.prep.protectedEnglish) }
                         .getOrNull()
                         ?.let { raw -> SlangDictionaryManager.restoreAndOverride(raw, item.prep) }
                         ?.takeIf { containsDevanagari(it) }

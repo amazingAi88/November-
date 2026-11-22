@@ -347,7 +347,7 @@ class OnDeviceDubbingEngine(private val context: Context) {
             )
             val isDirectDict = prep.directOverrideHindi != null
             val finalHindi = if (isDirectDict) {
-                prep.directOverrideHindi!!
+                prep.directOverrideHindi
             } else {
                 val mlKit = translator ?: getOrCreateTranslator().also { translator = it }
                 val cleanedEnglish = normalizeEnglishForTranslation(prep.protectedEnglish)

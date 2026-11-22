@@ -185,7 +185,6 @@ object Media3HardwareConfig {
             setMediaCodecSelector(buildMediaCodecSelector(settings))
             setEnableDecoderFallback(settings.allowCodecFallback)
             setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
-            setEnableAudioTrackPlaybackParams(true)
             setEnableAudioOutputPlaybackParameters(true)
             if (useAsync) {
                 forceEnableMediaCodecAsynchronousQueueing()
